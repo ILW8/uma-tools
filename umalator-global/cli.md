@@ -68,9 +68,13 @@ skills that file says are **buyable right now**, and it prices them with that fi
 (or different trees), then feed `{...a, uma2: b.uma1}` back in as a `state.json` to compare them.
 
 Chart several courses in one run by passing them all to `--course` — one table each, or with `--json`
-one flat array with a `courseId` on every row. Prefer this over a run per course: the pool is dealt
+one flat array with a `courseId` on every row. Prefer this over a run per course: the pool is fed
 (course, skill) pairs, so it stays full instead of draining in each course's tail, and the workers spin
 up and compile the bundle once. Measured over 12 courses it is a bit over 2x.
+
+Pairs are handed to threads one at a time as they finish, not dealt out up front. Their costs span ~10x
+(see the escalation note below), so a static split leaves the pool waiting on whichever thread drew the
+slow ones — measured at 20% of a round.
 
 `--race` vocabulary: `firm good soft heavy` / `sunny cloudy rainy snowy` /
 `spring summer autumn winter sakura` / `morning midday evening night` / `g1 g2 g3 op`.
@@ -114,8 +118,9 @@ the site). Two runs of the same command are identical; to sample differently, ch
 `course_data.json` and `umas.json` are read from this directory, and `simulator.worker.js` is built
 from the TS sources. `update.bat` regenerates all of it from `master.mdb`; don't refresh one half alone.
 
-**`--json` shapes.** Chart: an array of `{id, min, max, mean, median, nsamples, spcost, bashinPerSp}`,
-sorted by mean. Compare: `{results, nspurt}`, where `results` is the sorted per-race bashin.
+**`--json` shapes.** Chart: an array of `{id, min, max, mean, median, nsamples, spcost, bashinPerSp}`
+plus `courseId`, sorted by mean and then by id and course, so the order doesn't depend on the threads.
+Compare: `{results, nspurt}`, where `results` is the sorted per-race bashin.
 
 **`--selfcheck` covers only the bookkeeping this file adds** — SP costs, which skills are candidates,
 and the extractor→HorseState mapping. Everything else is the shipped bundle's, unchanged.

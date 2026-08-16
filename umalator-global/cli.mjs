@@ -55,48 +55,56 @@ function makeWorker() {
 
 // --- chart (skill table) ------------------------------------------------------------------------
 
-// one skill per 'chart' message instead of the whole slice at once: the rounds inside doChart() are
-// per-skill anyway, so this costs nothing and keeps a skill that throws from taking the slice with it.
-// `work` is a list of [job index, skill id]; jobs[i] is the per-course data to chart it against.
-function chartSlice({jobs, work}) {
+// one skill per 'chart' message instead of a whole batch: the rounds inside doChart() are per-skill
+// anyway, so this costs nothing and keeps a skill that throws from taking its neighbours with it.
+// Each message is one [job index, skill id] to chart; jobs[i] is the per-course data to chart it against.
+// A null means the queue is empty and the thread can go home.
+function chartSlice({jobs}) {
 	const post = makeWorker();
-	const rows = [];
-	for (const [ji, id] of work) {
+	parentPort.on('message', work => {
+		if (work == null) return void parentPort.close();
+		const [ji, id] = work;
+		let row = null;
 		try {
 			const r = post({msg: 'chart', data: {...jobs[ji], skills: [id]}}).results.get(id);
-			rows.push({ji, id, min: r.min, max: r.max, mean: r.mean, median: r.median, nsamples: r.results.length});
+			row = {ji, id, min: r.min, max: r.max, mean: r.mean, median: r.median, nsamples: r.results.length};
 		} catch (_) {
 			// ponytail: stand-in for getActivateableSkills(), which lives in BasinnChart.tsx and isn't reachable
 			// from the worker bundle. Skills it would reject blow up in buildSkillData instead; drop them.
 		}
-		parentPort.postMessage({tick: 1});
-	}
-	parentPort.postMessage({rows});
+		parentPort.postMessage(row);
+	});
 }
 
-// jobs: [{courseId, data}]. Work is dealt over (course, skill) pairs rather than one course at a time,
-// because one course's skills don't fill the pool — 44 candidates over 31 threads is two deep, so half
-// the threads sit idle through the tail, and it gets worse as the candidate list shrinks. Pooling every
-// course's pairs makes the slices ~17 deep, where the spread in per-skill cost averages out.
+// jobs: [{courseId, data}]. Work is (course, skill) pairs rather than one course at a time, because one
+// course's skills don't fill the pool — 44 candidates over 31 threads is two deep, so half the threads
+// sit idle through the tail, and it gets worse as the candidate list shrinks.
+//
+// Pairs are handed out one at a time on demand rather than dealt up front. Their costs span ~10x — a
+// candidate pruned after 20 samples against one that runs all 200 — so any static split is a dice roll:
+// measured over 12 courses the slowest of 31 pre-dealt slices ran 28.3s against a 22.5s mean, leaving
+// 20% of the round idle. On demand the tail is one pair deep instead.
 async function runChart(jobs, skills) {
 	const work = jobs.flatMap((_, ji) => skills.map(id => [ji, id]));
 	const nthreads = Math.max(1, Math.min(os.availableParallelism() - 1, work.length));
-	// dealt round-robin, not in contiguous blocks: neighbouring ids are variants of the same skill and cost
-	// about the same to simulate, so blocks come out badly unbalanced
-	const slices = Array.from({length: nthreads}, (_, j) => work.filter((_, i) => i % nthreads == j));
 	process.stderr.write(`ranking ${skills.length} skills on ${jobs.length} course(s) across ${nthreads} threads\n`);
-	let done = 0;
+	let next = 0, done = 0;
 	const data = jobs.map(j => j.data);
-	const rows = await Promise.all(slices.map(slice => new Promise((resolve, reject) => {
-		const w = new Worker(fileURLToPath(import.meta.url), {workerData: {chart: {jobs: data, work: slice}}});
-		w.on('message', m => {
-			if (m.rows) resolve(m.rows);
-			else if (process.stderr.isTTY) process.stderr.write(`\r${++done}/${work.length}`);
+	const rows = new Array(work.length);  // by work index, so the output doesn't depend on who finished first
+	await Promise.all(Array.from({length: nthreads}, () => new Promise((resolve, reject) => {
+		const w = new Worker(fileURLToPath(import.meta.url), {workerData: {chart: {jobs: data}}});
+		let mine = -1;  // each thread has exactly one pair outstanding
+		const feed = () => next < work.length ? w.postMessage(work[mine = next++]) : (w.postMessage(null), resolve());
+		w.on('message', row => {
+			if (row) rows[mine] = row;
+			if (process.stderr.isTTY) process.stderr.write(`\r${++done}/${work.length}`);
+			feed();
 		});
 		w.on('error', reject);
+		feed();
 	})));
 	if (process.stderr.isTTY) process.stderr.write('\r\x1b[K');
-	return rows.flat().map(({ji, ...r}) => ({...r, courseId: jobs[ji].courseId}));
+	return rows.filter(Boolean).map(({ji, ...r}) => ({...r, courseId: jobs[ji].courseId}));
 }
 
 // skill lists, from app.tsx / SkillList.tsx / HorseDef.tsx
@@ -367,7 +375,9 @@ if (argv.includes('--chart')) {
 		r.spcost = available ? available.get(r.id) : costForId(r.id, o.hintLevels || {}, uma1.skills);
 		r.bashinPerSp = r.mean / r.spcost;
 	});
-	rows.sort((a, b) => b.mean - a.mean);
+	// tie-break to a total order: plenty of skills score exactly 0 on more than one course, and without
+	// this their order is whatever the thread pool happened to do
+	rows.sort((a, b) => b.mean - a.mean || +a.id - +b.id || a.courseId - b.courseId);
 	if (argv.includes('--json')) {
 		console.log(JSON.stringify(rows));
 	} else {
