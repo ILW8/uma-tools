@@ -33,7 +33,7 @@ Run it from the repo root or `umalator-global/`; otherwise pass `--dir path/to/u
 | `--race C,C` | conditions, passed to `cli.mjs` (default `firm,sunny,spring,midday,g1`) |
 | `--min-gain N` | stop buying below this weighted bashin (default 0.05) |
 | `--top N` | runners-up to print per round (default 6) |
-| `--nsamples N` | samples for the final verify (default 2000) |
+| `--nsamples N` | samples for the final verify (default 1000) |
 | `--screen-samples N` | samples for the style screen (default 500) |
 | `--screen-rounds N` | skills to build per style before screening (default 4; `0` restores the old unbuilt screen) |
 | `--out F` | write the result as JSON |
@@ -70,22 +70,33 @@ probably isn't near-optimal for that uma.
 
 ## Runtime
 
-Measured on 32 cores, `long --strategy Senkou --min-gain 1`: **121s** — 93s greedy charting (4 rounds ×
-12 courses), 28s verify. Add roughly `--screen-rounds` × 25s for each style that loses the screen (the
-winner's rounds are reused, not repeated). Phase headers print elapsed seconds, so attribute before tuning.
+Measured on 32 cores, `long --strategy Senkou --min-gain 1`: **~109s** — 85s greedy charting (4 rounds ×
+12 courses), 19–26s verify. Add roughly `--screen-rounds` × 21s for each style that loses the screen (the
+winner's rounds are reused, not repeated), which is what dominates a run that doesn't pass `--strategy`.
+Phase headers print elapsed seconds, so attribute before tuning. Charting repeats to the second; the
+verify is 12 single-threaded compares racing, so it's the phase that moves run to run.
 
-Both phases are parallel now: a chart round passes every course to one `cli.mjs --course a,b,c`, which
-deals (course, skill) pairs across the pool, and the compare phases (screen, verify) run one course per
-core. Neither scales linearly — compare is bounded by the slowest single course (~1.8× the mean), so
-it's 6.8× on 12 courses, not 12×.
+Both phases are parallel: a chart round passes every course to one `cli.mjs --course a,b,c`, which hands
+out (course, skill) pairs to the pool on demand, and the compare phases (screen, verify) run one course
+per core. Compare doesn't scale linearly — it's bounded by its slowest single course (~1.8× the mean),
+so 6.8× on 12 courses, not 12×.
 
-Charting still costs the most, and `--min-gain` is what buys whole extra chart rounds, so lower it last.
-`--nsamples`/`--screen-samples` only shrink the compare phases, which are already the cheap half. Cut
-`--screen-rounds` only if you know the uma has no style-locked skills in its buyable list.
+Charting is ~78% of a run, and `--min-gain` is what buys whole extra chart rounds, so lower it last.
+`--nsamples`/`--screen-samples` only shrink the compare phases, and what you pay is the count you asked
+for **plus** a full throwaway run at every rung below it — `doCompare()` re-runs the whole comparison at
+20, 120, 600, 2400 to refresh the website's graph as it sharpens, and headless every one of those is
+discarded. So the flag has cliffs: 500 → 640 samples, 600 → 740, but 601 → 1341, 1000 → 1740, 2000 →
+2740. Both defaults are set against the decision the number feeds rather than for precision, so raising
+them buys little. Cut `--screen-rounds` only if you know the uma has no style-locked skills.
 
-Don't bother stripping the simulator's telemetry arrays — it was tried and measured at ~0%. A CPU
+Two things measured and not worth doing. Stripping the simulator's telemetry arrays: ~0%, because a CPU
 profile puts ~92% of a run in physics (`step`, `updateTargetSpeed`, `processSkillActivations`,
-`hpPerSecond`) and GC at 1.1%. Further wins have to come from running fewer simulations, not faster ones.
+`hpPerSecond`) and GC at 1.1%. Pruning low-scoring candidates across greedy rounds: the chart's own
+sampling ladder already spends only 16% of a round on the candidates that die at 20 samples, and dropping
+them makes the work queue too shallow to balance. What is left is worth **1.9×** — chart mode
+re-simulates the unchanged baseline uma once per candidate, and that run measures bit-identical across
+candidates (except for candidates that debuff, which have to fall back). It needs a patched
+`simulator.worker.js`, which is why it hasn't been done.
 
 ## Assumptions baked in
 
