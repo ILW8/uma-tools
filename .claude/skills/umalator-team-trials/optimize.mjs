@@ -6,11 +6,12 @@
 //   node optimize.mjs --selfcheck
 //
 // See SKILL.md. No dependencies; needs the same Node 22 cli.mjs wants.
-import {execFileSync} from 'node:child_process';
+import {execFile, execFileSync} from 'node:child_process';
 import {readFileSync, writeFileSync, existsSync, mkdtempSync} from 'node:fs';
-import {tmpdir} from 'node:os';
+import {availableParallelism, tmpdir} from 'node:os';
 import * as path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {promisify} from 'node:util';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const COURSES = JSON.parse(readFileSync(path.join(HERE, 'courses.json'), 'utf8'));
@@ -32,8 +33,19 @@ function findDir() {
 	throw new Error('cannot find umalator-global (no cli.mjs in cwd or ./umalator-global); pass --dir');
 }
 const DIR = findDir();
-const run = (args, env) => execFileSync('node', ['cli.mjs', ...args],
-	{cwd: DIR, encoding: 'utf8', maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'ignore'], env: {...process.env, ...env}});
+const RUNOPTS = {cwd: DIR, encoding: 'utf8', maxBuffer: 1 << 26};
+const run = args => execFileSync('node', ['cli.mjs', ...args], {...RUNOPTS, stdio: ['ignore', 'pipe', 'ignore']});
+const runP = args => promisify(execFile)('node', ['cli.mjs', ...args], RUNOPTS).then(r => r.stdout);
+
+// cli.mjs only fans out over threads in --chart mode; a compare is one core for its whole run, so the
+// courses are the only parallelism available to headToHead(). Ordered results, so output is unchanged.
+async function pool(items, fn) {
+	const out = new Array(items.length);
+	let next = 0;
+	await Promise.all(Array.from({length: Math.min(items.length, Math.max(1, availableParallelism() - 1))},
+		async () => { for (let i = next++; i < items.length; i = next++) out[i] = await fn(items[i], i); }));
+	return out;
+}
 
 // --- selfcheck: every course id resolves, and matches the label -------------
 if (has('--selfcheck')) {
@@ -75,8 +87,8 @@ const courses = COURSES[type];
 const WSUM = courses.reduce((a, [, w]) => a + w, 0);
 const RACE = arg('--race');
 const MIN_GAIN = parseFloat(arg('--min-gain', '0.05'));
-// compare mode is single-threaded (only --chart fans out over workers), so samples are the
-// wall-clock knob. The screen only has to resolve a multi-bashin gap; the final verify is reported.
+// one cli.mjs compare is single-threaded, but headToHead() runs the courses concurrently, so samples
+// are no longer the main knob. The screen only has to resolve a multi-bashin gap; the verify is reported.
 const NSAMPLES = arg('--nsamples', '2000');
 const SCREEN_SAMPLES = arg('--screen-samples', '500');
 // the screen builds this many skills per style before comparing. Screening unbuilt umas is wrong:
@@ -95,25 +107,29 @@ const nameOf = id => names[id]?.at(-1) ?? id;
 const scratch = mkdtempSync(path.join(tmpdir(), 'umalator-'));
 const scratchFile = n => path.join(scratch, n);
 
+// stamped on the phase headers so a slow run can be attributed to a phase without a profiler
+const T0 = Date.now();
+const at = () => `[${((Date.now() - T0) / 1000).toFixed(1)}s]`;
+
 const raceArgs = RACE ? ['--race', RACE] : [];
-const dump = (tree, course, strat) => JSON.parse(
-	run(['--skills', tree, '--course', String(course), '--chart', '--strategy', strat, '--dumpstate', ...raceArgs]));
+const dump = async (tree, course, strat) => JSON.parse(
+	await runP(['--skills', tree, '--course', String(course), '--chart', '--strategy', strat, '--dumpstate', ...raceArgs]));
 
 // uma1 = (treeA, stratA) vs uma2 = (treeB, stratB); positive mean = B ahead
-function headToHead(treeA, stratA, treeB, stratB, nsamples = NSAMPLES) {
-	let wmean = 0, wahead = 0;
-	const rows = [];
-	for (const [course, w, label] of courses) {
-		const a = dump(treeA, course, stratA), b = dump(treeB, course, stratB);
-		const state = scratchFile('cmp.json');
+async function headToHead(treeA, stratA, treeB, stratB, nsamples = NSAMPLES) {
+	const rows = await pool(courses, async ([course, w, label], i) => {
+		const [a, b] = await Promise.all([dump(treeA, course, stratA), dump(treeB, course, stratB)]);
+		const state = scratchFile(`cmp-${i}.json`);  // one per course; they run concurrently now
 		writeFileSync(state, JSON.stringify({...a, uma2: b.uma1}));
-		const {results} = JSON.parse(run([state, '--nsamples', nsamples, '--json']));
+		const {results} = JSON.parse(await runP([state, '--nsamples', nsamples, '--json']));
 		const mean = results.reduce((x, y) => x + y, 0) / results.length;
-		const ahead = results.filter(x => x > 0).length / results.length * 100;
-		wmean += mean * w / WSUM; wahead += ahead * w / WSUM;
-		rows.push({label, w, mean, ahead});
-	}
-	return {wmean, wahead, rows};
+		return {label, w, mean, ahead: results.filter(x => x > 0).length / results.length * 100};
+	});
+	return {
+		wmean: rows.reduce((a, r) => a + r.mean * r.w / WSUM, 0),
+		wahead: rows.reduce((a, r) => a + r.ahead * r.w / WSUM, 0),
+		rows
+	};
 }
 
 // --- greedy machinery (shared by the screen and the buy order) --------------
@@ -181,7 +197,7 @@ console.log(`aptitudes: ${Object.keys(STRATEGIES).map(s => `${s} ${apt(s)}`).joi
 let strategy = candidates[0], screen = null;
 const builds = new Map();
 if (candidates.length > 1) {
-	console.log(`\n=== style screen (${SCREEN_ROUNDS}-skill partial builds, vs ${candidates[0]}) ===`);
+	console.log(`\n${at()} === style screen (${SCREEN_ROUNDS}-skill partial builds, vs ${candidates[0]}) ===`);
 	for (const s of candidates) {
 		const b = newBuild(s);
 		greedy(b, s, SCREEN_ROUNDS, false);
@@ -191,7 +207,7 @@ if (candidates.length > 1) {
 	const ref = candidates[0];
 	screen = [{name: ref, margin: 0}];
 	for (const s of candidates.slice(1)) {
-		const {wmean, wahead} = headToHead(builds.get(ref).file, ref, builds.get(s).file, s, SCREEN_SAMPLES);
+		const {wmean, wahead} = await headToHead(builds.get(ref).file, ref, builds.get(s).file, s, SCREEN_SAMPLES);
 		console.log(`  ${s.padEnd(8)} ${wmean >= 0 ? '+' : ''}${wmean.toFixed(2)} bashin vs ${ref}  (ahead ${wahead.toFixed(1)}% of races)`);
 		screen.push({name: s, margin: wmean});
 	}
@@ -203,7 +219,7 @@ if (candidates.length > 1) {
 }
 
 // --- phase 2: greedy purchases ---------------------------------------------
-console.log(`\n=== ${strategy} buy order ===`);
+console.log(`\n${at()} === ${strategy} buy order ===`);
 // the screen already bought the first SCREEN_ROUNDS for this style — carry them over rather than
 // re-chart them, so screening the losers is the only extra cost
 const build = builds.get(strategy) ?? newBuild(strategy);
@@ -220,14 +236,16 @@ if (!bought.length) {
 	console.log(`nothing cleared --min-gain ${MIN_GAIN}, so there is no build to verify.`);
 	process.exit(0);
 }
-console.log(`\n=== verify (built vs unbuilt, both ${strategy}) ===`);
-const {wmean, wahead, rows} = headToHead(treeFile, strategy, build.file, strategy);
+console.log(`\n${at()} === verify (built vs unbuilt, both ${strategy}) ===`);
+const {wmean, wahead, rows} = await headToHead(treeFile, strategy, build.file, strategy);
 for (const r of rows)
 	console.log(`  ${r.label.padEnd(17)} ${r.w.toFixed(1).padStart(5)}%  ${r.mean.toFixed(2).padStart(7)} bashin  built ahead ${r.ahead.toFixed(1).padStart(5)}%`);
 const predicted = bought.reduce((a, b) => a + b.wmean, 0);
 console.log(`\nmeasured ${wmean.toFixed(2)} bashin (predicted ${predicted.toFixed(2)} from the marginals), ahead in ${wahead.toFixed(1)}% of races`);
 if (Math.abs(wmean - predicted) > Math.max(1, 0.25 * predicted))
 	console.log('! measured and predicted disagree by >25% — the greedy path is probably not near-optimal here');
+
+console.log(`${at()} done`);
 
 const out = arg('--out');
 if (out) { writeFileSync(out, JSON.stringify({type, strategy, screen, bought, spent, left: budget, measured: wmean}, null, 1)); console.log(`wrote ${out}`); }

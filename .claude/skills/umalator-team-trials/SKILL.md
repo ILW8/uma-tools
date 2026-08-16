@@ -70,11 +70,16 @@ probably isn't near-optimal for that uma.
 
 ## Runtime
 
-~15 min for a full long-distance run on 32 threads, plus roughly `--screen-rounds` × 40s for each style
-that loses the screen (the winner's rounds are reused, not repeated). `--chart` fans out over workers
-(~3s/course); compare mode is single-threaded, so the screen and verify passes dominate. Lower
-`--screen-samples` before lowering anything else, and `--screen-rounds` only if you know the uma has no
-style-locked skills in its buyable list.
+Measured on 32 cores, `long --strategy Senkou --min-gain 1`: **251s** — 212s greedy charting (4 rounds ×
+12 courses), 38s verify. Add roughly `--screen-rounds` × 50s for each style that loses the screen (the
+winner's rounds are reused, not repeated). Phase headers print elapsed seconds, so attribute before tuning.
+
+**Greedy charting dominates.** Each `--chart` invocation already saturates the workers (~3s/course) and
+the 12–21 courses run one after another. The compare phases (screen, verify) are one core per race, so
+they run one course per core instead — 6.8× measured, not 12×, because the makespan is the slowest
+course (~1.8× the mean). So: lower `--min-gain` last, since it buys whole extra 12-course chart rounds.
+`--nsamples`/`--screen-samples` only shrink the phases that are already cheap. Cut `--screen-rounds`
+only if you know the uma has no style-locked skills in its buyable list.
 
 ## Assumptions baked in
 
