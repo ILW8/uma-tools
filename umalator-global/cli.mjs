@@ -4,11 +4,12 @@
 // Runs the committed simulator.worker.js (the exact bundle the website ships) inside a vm context with
 // `self`/`postMessage` shimmed, so no build step and no browser are involved.
 //
-// usage: node cli.mjs <share url | #hash | state.json> [--chart] [--nsamples N] [--top N] [--json]
+// usage: node cli.mjs <share url | #hash | state.json> [--chart] [--nsamples N] [--top N] [--skills F] [--json]
 //
 //   default        compare uma1 vs uma2 (the "真っ向勝負" tab)
 //   --chart        rank every candidate skill for uma1 (the "skill effect value" table), one thread per core
 //   --top N        chart rows to print, best mean first (default 40, 0 for all)
+//   --skills F     chart only the skills buyable in F (UmaExtractor's skill_tree.json), priced with its costs
 //   --json         dump the raw numbers instead of a table
 //
 // `node cli.mjs --selfcheck` runs the assertions on the skill list/cost bookkeeping copied out of the tsx.
@@ -133,6 +134,11 @@ function costForId(id, hints, owned) {
 	return cost;
 }
 
+// UmaExtractor's skill_tree.json: what this account can actually buy right now, at the price it's charged
+// (discountedCost already has the hints and the tree's own discount baked in, so costForId() isn't used).
+// ids are numbers there and strings everywhere here.
+const availableSkills = tree => new Map(tree.buyable_skills.map(s => [String(s.skillId), s.discountedCost]));
+
 // --- state --------------------------------------------------------------------------------------
 
 async function loadState(input) {
@@ -192,7 +198,10 @@ if (argv.includes('--selfcheck')) {
 		eq(costForId('200021', {}, new Map([['20002','200022']])), 110, 'owning ○ leaves only ◎'),
 		eq(costForId('200022', {'200022': 3}, new Map()), 62, 'hint 3 is a 30% discount (90*0.7 floors to 62, as in game)'),
 		eq(inGroup20002({skills: new Map()}), 2, 'both tiers are candidates when neither is owned'),
-		eq(inGroup20002({skills: new Map([['20002','200021']])}), 0, 'owning ◎ hides it and the ○ below it')
+		eq(inGroup20002({skills: new Map([['20002','200021']])}), 0, 'owning ◎ hides it and the ○ below it'),
+		eq(chartSkills({chartMode: 'all'}, {skills: new Map()})
+			.filter(id => availableSkills({buyable_skills: [{skillId: 200022, discountedCost: 62}]}).has(id))
+			.join(), '200022', 'numeric skillIds from the tree match the string ids used here')
 	].every(x => x);
 	console.log(ok ? 'ok' : 'FAILED');
 	process.exit(+!ok);
@@ -200,14 +209,17 @@ if (argv.includes('--selfcheck')) {
 
 let input = null;
 for (let i = 0; i < argv.length && input == null; ++i) {
-	if (argv[i] == '--nsamples' || argv[i] == '--top') ++i;  // skip the value
+	if (argv[i] == '--nsamples' || argv[i] == '--top' || argv[i] == '--skills') ++i;  // skip the value
 	else if (!argv[i].startsWith('-')) input = argv[i];
 }
 if (input == null) {
-	console.error('usage: node cli.mjs <share url | #hash | state.json> [--chart] [--nsamples N] [--top N] [--json]');
+	console.error('usage: node cli.mjs <share url | #hash | state.json> [--chart] [--nsamples N] [--top N] [--skills F] [--json]');
 	process.exit(1);
 }
 const flag = (name, default_) => argv.indexOf(name) > -1 ? parseInt(argv[argv.indexOf(name) + 1], 10) : default_;
+const available = argv.includes('--skills')
+	? availableSkills(JSON.parse(fs.readFileSync(argv[argv.indexOf('--skills') + 1], 'utf8')))
+	: null;
 
 const o = await loadState(input);
 const course = courses[o.courseId];
@@ -222,7 +234,8 @@ const options = {
 const header = `course ${o.courseId} (${course.distance}m) · seed ${options.seed}`;
 
 if (argv.includes('--chart')) {
-	const skills = chartSkills({chartMode: 'all', ...o}, uma1);
+	let skills = chartSkills({chartMode: 'all', ...o}, uma1);
+	if (available) skills = skills.filter(id => available.has(id));
 	const rows = await runChart({
 		course,
 		racedef: racedefToParams(o.racedef, uma1.strategy),
@@ -230,7 +243,7 @@ if (argv.includes('--chart')) {
 		options: {...options, useIntChecks: false}  // app.tsx forces this off for the chart
 	}, skills);
 	rows.forEach(r => {
-		r.spcost = costForId(r.id, o.hintLevels || {}, uma1.skills);
+		r.spcost = available ? available.get(r.id) : costForId(r.id, o.hintLevels || {}, uma1.skills);
 		r.bashinPerSp = r.mean / r.spcost;
 	});
 	rows.sort((a, b) => b.mean - a.mean);
