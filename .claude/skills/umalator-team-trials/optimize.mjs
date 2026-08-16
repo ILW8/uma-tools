@@ -88,12 +88,13 @@ const WSUM = courses.reduce((a, [, w]) => a + w, 0);
 const RACE = arg('--race');
 const MIN_GAIN = parseFloat(arg('--min-gain', '0.05'));
 // one cli.mjs compare is single-threaded, so headToHead() is bounded by its slowest single course, and
-// doCompare() climbs a ladder to get there (1000 costs 1740 samples, 2000 costs 2740). The screen only
-// has to resolve a multi-bashin gap and the verify is checked against a +/-25% band, so precision is not
-// the binding constraint. Measured on Nakayama 3600, the slowest long course:
+// doCompare() climbs a ladder to get there, and 600 is the last rung — it costs 740 samples where 601
+// costs 1341 and 1000 costs 1740. The screen only has to resolve a multi-bashin gap and the verify is
+// checked against a +/-25% band, so precision is not the binding constraint. Measured on Nakayama 3600,
+// the slowest long course:
 //   2000  28.4s  SE 0.16 bashin      500  6.5s  SE 0.29
 //   1000  17.2s  SE 0.22             200  3.2s  SE 0.47
-const NSAMPLES = arg('--nsamples', '1000');
+const NSAMPLES = arg('--nsamples', '600');
 const SCREEN_SAMPLES = arg('--screen-samples', '500');
 // the screen builds this many skills per style before comparing. Screening unbuilt umas is wrong:
 // buyable_skills are invisible to it, and a style-locked skill (Angling and Scheming needs order==1,

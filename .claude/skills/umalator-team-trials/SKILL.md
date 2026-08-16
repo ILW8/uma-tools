@@ -33,7 +33,7 @@ Run it from the repo root or `umalator-global/`; otherwise pass `--dir path/to/u
 | `--race C,C` | conditions, passed to `cli.mjs` (default `firm,sunny,spring,midday,g1`) |
 | `--min-gain N` | stop buying below this weighted bashin (default 0.05) |
 | `--top N` | runners-up to print per round (default 6) |
-| `--nsamples N` | samples for the final verify (default 1000) |
+| `--nsamples N` | samples for the final verify (default 600) |
 | `--screen-samples N` | samples for the style screen (default 500) |
 | `--screen-rounds N` | skills to build per style before screening (default 4; `0` restores the old unbuilt screen) |
 | `--out F` | write the result as JSON |
