@@ -61,7 +61,11 @@ skills that file says are **buyable right now**, and it prices them with that fi
 | `--strategy S` | `Nige` \| `Senkou` \| `Sasi` \| `Oikomi` \| `Oonige`, defaults to the card's own |
 | `--race C,C` | conditions by name, anything omitted keeps the default |
 | `--json` | raw numbers instead of a table |
+| `--dumpstate` | print the built state as JSON and exit, instead of simulating |
 | `--selfcheck` | run the assertions and exit |
+
+`--dumpstate` is how you get a two-uma state out of `--skills`: dump twice with different `--strategy`
+(or different trees), then feed `{...a, uma2: b.uma1}` back in as a `state.json` to compare them.
 
 `--race` vocabulary: `firm good soft heavy` / `sunny cloudy rainy snowy` /
 `spring summer autumn winter sakura` / `morning midday evening night` / `g1 g2 g3 op`.

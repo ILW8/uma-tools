@@ -313,6 +313,8 @@ if (input == null && !(tree && tree.uma && arg('--course') && argv.includes('--c
 
 const o = input != null ? await loadState(input)
 	: stateFromTree(tree, flag('--course'), arg('--strategy'), racedefFor(arg('--race')));
+// print the state and stop, so a caller can splice two of these into one compare state
+if (argv.includes('--dumpstate')) { console.log(JSON.stringify(o)); process.exit(0); }
 const course = courses[o.courseId];
 course.slopes.sort((a, b) => a.start - b.start);  // CourseHelpers.getCourse()
 const uma1 = deserializeUma(o.uma1);
