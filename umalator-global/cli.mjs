@@ -17,6 +17,7 @@
 //   --json         dump the raw numbers instead of a table
 //
 // `node cli.mjs --selfcheck` runs the assertions on the skill list/cost bookkeeping copied out of the tsx.
+// cli.md has the longer version: what the flags do, what's assumed, and what the numbers mean.
 //
 // ponytail: drives the prebuilt worker rather than the TS sources, because umalator/compare.ts currently
 // needs RaceSolverBuilder methods (otherHorse, withItidoriarasoi, 4-arg addSkill) that don't exist in the
