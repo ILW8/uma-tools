@@ -133,16 +133,18 @@ async function headToHead(treeA, stratA, treeB, stratB, nsamples = NSAMPLES) {
 }
 
 // --- greedy machinery (shared by the screen and the buy order) --------------
-// one chart over every course, weighted by frequency: id -> {wmean, spcost}
+// one chart over every course, weighted by frequency: id -> {wmean, spcost}.
+// All courses go in one cli.mjs run: charting them one at a time left half the thread pool idle in each
+// course's tail (44 candidates over 31 threads) and re-spun the workers 12-21 times per round.
+const WEIGHT = new Map(courses.map(([course, w]) => [course, w]));
 function chartRound(workTree, strategy) {
 	const agg = new Map();
-	for (const [course, w] of courses)
-		for (const r of JSON.parse(run(['--skills', workTree, '--course', String(course), '--chart',
-				'--strategy', strategy, '--json', '--top', '0', ...raceArgs]))) {
-			const e = agg.get(r.id) || {wmean: 0, spcost: r.spcost};
-			e.wmean += r.mean * w / WSUM;
-			agg.set(r.id, e);
-		}
+	for (const r of JSON.parse(run(['--skills', workTree, '--course', courses.map(([c]) => c).join(','),
+			'--chart', '--strategy', strategy, '--json', '--top', '0', ...raceArgs]))) {
+		const e = agg.get(r.id) || {wmean: 0, spcost: r.spcost};
+		e.wmean += r.mean * WEIGHT.get(r.courseId) / WSUM;
+		agg.set(r.id, e);
+	}
 	return agg;
 }
 

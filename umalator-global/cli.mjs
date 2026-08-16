@@ -5,13 +5,14 @@
 // `self`/`postMessage` shimmed, so no build step and no browser are involved.
 //
 // usage: node cli.mjs <share url | #hash | state.json> [--chart] [--nsamples N] [--top N] [--skills F] [--json]
-//        node cli.mjs --skills F --course ID --chart [--strategy S] [--top N] [--json]
+//        node cli.mjs --skills F --course ID[,ID..] --chart [--strategy S] [--top N] [--json]
 //
 //   default        compare uma1 vs uma2 (the "真っ向勝負" tab)
 //   --chart        rank every candidate skill for uma1 (the "skill effect value" table), one thread per core
 //   --top N        chart rows to print, best mean first (default 40, 0 for all)
 //   --skills F     chart only the skills buyable in F (UmaExtractor's skill_tree.json), priced with its costs
-//   --course ID    chart the uma in F instead of one from a share link (F must have the `uma` block)
+//   --course ID    chart the uma in F instead of one from a share link (F must have the `uma` block).
+//                  a comma-separated list charts every course in one run; rows are tagged with courseId
 //   --strategy S   Nige/Senkou/Sasi/Oikomi/Oonige, defaults to the card's own
 //   --race C,C,..  race conditions by name (firm sunny summer midday g1 ...), unnamed ones keep the default
 //   --json         dump the raw numbers instead of a table
@@ -56,13 +57,14 @@ function makeWorker() {
 
 // one skill per 'chart' message instead of the whole slice at once: the rounds inside doChart() are
 // per-skill anyway, so this costs nothing and keeps a skill that throws from taking the slice with it.
-function chartSlice({data, skills}) {
+// `work` is a list of [job index, skill id]; jobs[i] is the per-course data to chart it against.
+function chartSlice({jobs, work}) {
 	const post = makeWorker();
 	const rows = [];
-	for (const id of skills) {
+	for (const [ji, id] of work) {
 		try {
-			const r = post({msg: 'chart', data: {...data, skills: [id]}}).results.get(id);
-			rows.push({id, min: r.min, max: r.max, mean: r.mean, median: r.median, nsamples: r.results.length});
+			const r = post({msg: 'chart', data: {...jobs[ji], skills: [id]}}).results.get(id);
+			rows.push({ji, id, min: r.min, max: r.max, mean: r.mean, median: r.median, nsamples: r.results.length});
 		} catch (_) {
 			// ponytail: stand-in for getActivateableSkills(), which lives in BasinnChart.tsx and isn't reachable
 			// from the worker bundle. Skills it would reject blow up in buildSkillData instead; drop them.
@@ -72,23 +74,29 @@ function chartSlice({data, skills}) {
 	parentPort.postMessage({rows});
 }
 
-async function runChart(data, skills) {
-	const jobs = Math.max(1, Math.min(os.availableParallelism() - 1, skills.length));
+// jobs: [{courseId, data}]. Work is dealt over (course, skill) pairs rather than one course at a time,
+// because one course's skills don't fill the pool — 44 candidates over 31 threads is two deep, so half
+// the threads sit idle through the tail, and it gets worse as the candidate list shrinks. Pooling every
+// course's pairs makes the slices ~17 deep, where the spread in per-skill cost averages out.
+async function runChart(jobs, skills) {
+	const work = jobs.flatMap((_, ji) => skills.map(id => [ji, id]));
+	const nthreads = Math.max(1, Math.min(os.availableParallelism() - 1, work.length));
 	// dealt round-robin, not in contiguous blocks: neighbouring ids are variants of the same skill and cost
 	// about the same to simulate, so blocks come out badly unbalanced
-	const slices = Array.from({length: jobs}, (_, j) => skills.filter((_, i) => i % jobs == j));
-	process.stderr.write(`ranking ${skills.length} skills across ${jobs} threads\n`);
+	const slices = Array.from({length: nthreads}, (_, j) => work.filter((_, i) => i % nthreads == j));
+	process.stderr.write(`ranking ${skills.length} skills on ${jobs.length} course(s) across ${nthreads} threads\n`);
 	let done = 0;
+	const data = jobs.map(j => j.data);
 	const rows = await Promise.all(slices.map(slice => new Promise((resolve, reject) => {
-		const w = new Worker(fileURLToPath(import.meta.url), {workerData: {chart: {data, skills: slice}}});
+		const w = new Worker(fileURLToPath(import.meta.url), {workerData: {chart: {jobs: data, work: slice}}});
 		w.on('message', m => {
 			if (m.rows) resolve(m.rows);
-			else if (process.stderr.isTTY) process.stderr.write(`\r${++done}/${skills.length}`);
+			else if (process.stderr.isTTY) process.stderr.write(`\r${++done}/${work.length}`);
 		});
 		w.on('error', reject);
 	})));
 	if (process.stderr.isTTY) process.stderr.write('\r\x1b[K');
-	return rows.flat();
+	return rows.flat().map(({ji, ...r}) => ({...r, courseId: jobs[ji].courseId}));
 }
 
 // skill lists, from app.tsx / SkillList.tsx / HorseDef.tsx
@@ -307,12 +315,15 @@ const available = tree ? availableSkills(tree) : null;
 
 if (input == null && !(tree && tree.uma && arg('--course') && argv.includes('--chart'))) {
 	console.error('usage: node cli.mjs <share url | #hash | state.json> [--chart] [--nsamples N] [--top N] [--skills F] [--json]');
-	console.error('       node cli.mjs --skills F --course ID --chart [--strategy S] [--race C,C] [--top N] [--json]');
+	console.error('       node cli.mjs --skills F --course ID[,ID..] --chart [--strategy S] [--race C,C] [--top N] [--json]');
 	process.exit(1);
 }
 
-const o = input != null ? await loadState(input)
-	: stateFromTree(tree, flag('--course'), arg('--strategy'), racedefFor(arg('--race')));
+// --course takes a list in chart mode; charting every course in one invocation both fills the thread
+// pool properly (see runChart) and pays the worker spin-up and bundle compile once instead of per course
+const courseIds = (arg('--course') || '').split(',').filter(x => x).map(s => parseInt(s, 10));
+const stateFor = id => stateFromTree(tree, id, arg('--strategy'), racedefFor(arg('--race')));
+const o = input != null ? await loadState(input) : stateFor(courseIds[0]);
 // print the state and stop, so a caller can splice two of these into one compare state
 if (argv.includes('--dumpstate')) { console.log(JSON.stringify(o)); process.exit(0); }
 const course = courses[o.courseId];
@@ -324,7 +335,8 @@ const options = {
 	useCompeteTop: o.useCompeteTop ?? true,
 	useIntChecks: o.useIntChecks || false
 };
-const header = `${o.name ? o.name + ' · ' : ''}course ${o.courseId} (${course.distance}m) · seed ${options.seed}`;
+const headerFor = s => `${s.name ? s.name + ' · ' : ''}course ${s.courseId} (${courses[s.courseId].distance}m) · seed ${options.seed}`;
+const header = headerFor(o);
 if (input == null) process.stderr.write(
 	`${uma1.strategy} ${uma1.speed}/${uma1.stamina}/${uma1.power}/${uma1.guts}/${uma1.wisdom}` +
 	` (${uma1.distanceAptitude}${uma1.surfaceAptitude}${uma1.strategyAptitude}), unique lv${uma1.uniqueLv},` +
@@ -334,14 +346,23 @@ if (input == null) process.stderr.write(
 	).join('/') + '\n');
 
 if (argv.includes('--chart')) {
+	// the candidate list depends on what the uma owns, not on the course, so it's shared across jobs
 	let skills = chartSkills({chartMode: 'all', ...o}, uma1);
 	if (available) skills = skills.filter(id => available.has(id));
-	const rows = await runChart({
-		course,
-		racedef: racedefToParams(o.racedef, uma1.strategy),
-		uma: uma1,
-		options: {...options, useIntChecks: false}  // app.tsx forces this off for the chart
-	}, skills);
+	// the uma's distance and surface aptitudes are derived from the course, so each course needs its own state
+	const states = input != null || courseIds.length < 2 ? [o] : courseIds.map(stateFor);
+	const jobs = states.map(s => {
+		const c = courses[s.courseId];
+		c.slopes.sort((a, b) => a.start - b.start);  // CourseHelpers.getCourse()
+		const u = deserializeUma(s.uma1);
+		return {courseId: s.courseId, state: s, data: {
+			course: c,
+			racedef: racedefToParams(s.racedef, u.strategy),
+			uma: u,
+			options: {...options, useIntChecks: false}  // app.tsx forces this off for the chart
+		}};
+	});
+	const rows = await runChart(jobs, skills);
 	rows.forEach(r => {
 		r.spcost = available ? available.get(r.id) : costForId(r.id, o.hintLevels || {}, uma1.skills);
 		r.bashinPerSp = r.mean / r.spcost;
@@ -351,16 +372,19 @@ if (argv.includes('--chart')) {
 		console.log(JSON.stringify(rows));
 	} else {
 		const top = flag('--top', 40);
-		console.log(`${header} · ${rows.length}/${skills.length} skills ranked`);
-		console.log(['mean'.padStart(7), 'median'.padStart(8), 'min'.padStart(8), 'max'.padStart(8),
-			'SP'.padStart(6), 'L/SP'.padStart(10), '  skill'].join(''));
-		rows.slice(0, top > 0 ? top : rows.length).forEach(r => console.log([
-			r.mean.toFixed(2).padStart(7), r.median.toFixed(2).padStart(8),
-			r.min.toFixed(2).padStart(8), r.max.toFixed(2).padStart(8),
-			String(r.spcost).padStart(6),
-			(Number.isFinite(r.bashinPerSp) ? r.bashinPerSp.toFixed(6) : '--').padStart(10),
-			'  ' + skillnames[r.id][0]
-		].join('')));
+		jobs.forEach(j => {
+			const mine = rows.filter(r => r.courseId == j.courseId);
+			console.log(`${headerFor(j.state)} · ${mine.length}/${skills.length} skills ranked`);
+			console.log(['mean'.padStart(7), 'median'.padStart(8), 'min'.padStart(8), 'max'.padStart(8),
+				'SP'.padStart(6), 'L/SP'.padStart(10), '  skill'].join(''));
+			mine.slice(0, top > 0 ? top : mine.length).forEach(r => console.log([
+				r.mean.toFixed(2).padStart(7), r.median.toFixed(2).padStart(8),
+				r.min.toFixed(2).padStart(8), r.max.toFixed(2).padStart(8),
+				String(r.spcost).padStart(6),
+				(Number.isFinite(r.bashinPerSp) ? r.bashinPerSp.toFixed(6) : '--').padStart(10),
+				'  ' + skillnames[r.id][0]
+			].join('')));
+		});
 	}
 } else {
 	const {results, runData} = makeWorker()({

@@ -70,16 +70,22 @@ probably isn't near-optimal for that uma.
 
 ## Runtime
 
-Measured on 32 cores, `long --strategy Senkou --min-gain 1`: **251s** — 212s greedy charting (4 rounds ×
-12 courses), 38s verify. Add roughly `--screen-rounds` × 50s for each style that loses the screen (the
+Measured on 32 cores, `long --strategy Senkou --min-gain 1`: **121s** — 93s greedy charting (4 rounds ×
+12 courses), 28s verify. Add roughly `--screen-rounds` × 25s for each style that loses the screen (the
 winner's rounds are reused, not repeated). Phase headers print elapsed seconds, so attribute before tuning.
 
-**Greedy charting dominates.** Each `--chart` invocation already saturates the workers (~3s/course) and
-the 12–21 courses run one after another. The compare phases (screen, verify) are one core per race, so
-they run one course per core instead — 6.8× measured, not 12×, because the makespan is the slowest
-course (~1.8× the mean). So: lower `--min-gain` last, since it buys whole extra 12-course chart rounds.
-`--nsamples`/`--screen-samples` only shrink the phases that are already cheap. Cut `--screen-rounds`
-only if you know the uma has no style-locked skills in its buyable list.
+Both phases are parallel now: a chart round passes every course to one `cli.mjs --course a,b,c`, which
+deals (course, skill) pairs across the pool, and the compare phases (screen, verify) run one course per
+core. Neither scales linearly — compare is bounded by the slowest single course (~1.8× the mean), so
+it's 6.8× on 12 courses, not 12×.
+
+Charting still costs the most, and `--min-gain` is what buys whole extra chart rounds, so lower it last.
+`--nsamples`/`--screen-samples` only shrink the compare phases, which are already the cheap half. Cut
+`--screen-rounds` only if you know the uma has no style-locked skills in its buyable list.
+
+Don't bother stripping the simulator's telemetry arrays — it was tried and measured at ~0%. A CPU
+profile puts ~92% of a run in physics (`step`, `updateTargetSpeed`, `processSkillActivations`,
+`hpPerSecond`) and GC at 1.1%. Further wins have to come from running fewer simulations, not faster ones.
 
 ## Assumptions baked in
 

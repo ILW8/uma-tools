@@ -57,7 +57,7 @@ skills that file says are **buyable right now**, and it prices them with that fi
 | `--top N` | chart rows to print, best mean first (default 40, `0` for all) |
 | `--nsamples N` | compare only; the chart picks its own (see below) |
 | `--skills F` | UmaExtractor's `skill_tree.json` |
-| `--course ID` | build the uma from `F` instead of a share link; needs `--chart` and an `uma` block in `F` |
+| `--course ID[,ID..]` | build the uma from `F` instead of a share link; needs `--chart` and an `uma` block in `F` |
 | `--strategy S` | `Nige` \| `Senkou` \| `Sasi` \| `Oikomi` \| `Oonige`, defaults to the card's own |
 | `--race C,C` | conditions by name, anything omitted keeps the default |
 | `--json` | raw numbers instead of a table |
@@ -66,6 +66,11 @@ skills that file says are **buyable right now**, and it prices them with that fi
 
 `--dumpstate` is how you get a two-uma state out of `--skills`: dump twice with different `--strategy`
 (or different trees), then feed `{...a, uma2: b.uma1}` back in as a `state.json` to compare them.
+
+Chart several courses in one run by passing them all to `--course` — one table each, or with `--json`
+one flat array with a `courseId` on every row. Prefer this over a run per course: the pool is dealt
+(course, skill) pairs, so it stays full instead of draining in each course's tail, and the workers spin
+up and compile the bundle once. Measured over 12 courses it is a bit over 2x.
 
 `--race` vocabulary: `firm good soft heavy` / `sunny cloudy rainy snowy` /
 `spring summer autumn winter sakura` / `morning midday evening night` / `g1 g2 g3 op`.
