@@ -5,11 +5,15 @@
 // `self`/`postMessage` shimmed, so no build step and no browser are involved.
 //
 // usage: node cli.mjs <share url | #hash | state.json> [--chart] [--nsamples N] [--top N] [--skills F] [--json]
+//        node cli.mjs --skills F --course ID --chart [--strategy S] [--top N] [--json]
 //
 //   default        compare uma1 vs uma2 (the "真っ向勝負" tab)
 //   --chart        rank every candidate skill for uma1 (the "skill effect value" table), one thread per core
 //   --top N        chart rows to print, best mean first (default 40, 0 for all)
 //   --skills F     chart only the skills buyable in F (UmaExtractor's skill_tree.json), priced with its costs
+//   --course ID    chart the uma in F instead of one from a share link (F must have the `uma` block)
+//   --strategy S   Nige/Senkou/Sasi/Oikomi/Oonige, defaults to the card's own
+//   --race C,C,..  race conditions by name (firm sunny summer midday g1 ...), unnamed ones keep the default
 //   --json         dump the raw numbers instead of a table
 //
 // `node cli.mjs --selfcheck` runs the assertions on the skill list/cost bookkeeping copied out of the tsx.
@@ -31,6 +35,7 @@ const skillmeta = readJson('skill_meta.json');
 const skilldata = readJson('skill_data.json');
 const skillnames = readJson('skillnames.json');
 const courses = readJson('course_data.json');
+const umas = readJson('umas.json');
 
 const DEFAULT_SEED = 2615953739;  // keep in sync with umalator/app.tsx
 
@@ -158,6 +163,70 @@ function skillSet(ids) {
 	]));
 }
 
+// The same file also dumps the career uma. Speed/Stamina/... are its current stats; the Max* fields are
+// that career's stat caps, not the uma, so they're ignored. Building the state here means a chart can run
+// straight off the game data instead of round-tripping through the site to make a share link.
+const APTITUDES = ['ProperDistanceShort', 'ProperDistanceMile', 'ProperDistanceMiddle', 'ProperDistanceLong',
+	'ProperRunningStyleNige', 'ProperRunningStyleSenko', 'ProperRunningStyleSashi', 'ProperRunningStyleOikomi',
+	'ProperGroundTurf', 'ProperGroundDirt'];
+const STRATEGIES = ['', 'Nige', 'Senkou', 'Sasi', 'Oikomi'];  // as indexed by umas.json, per HorseDef.tsx
+// the race itself isn't in the game data anywhere, so --race takes the conditions by name and everything
+// left out keeps the site's default. Ground is named the way the global client names it (ja 良/稍重 are
+// firm/good there, not good/yielding).
+const DEFAULT_RACEDEF = {ground: 1, weather: 1, season: 1, time: 2, grade: 100};
+const RACE_CONDITIONS = {
+	firm: ['ground', 1], good: ['ground', 2], soft: ['ground', 3], heavy: ['ground', 4],
+	sunny: ['weather', 1], cloudy: ['weather', 2], rainy: ['weather', 3], snowy: ['weather', 4],
+	spring: ['season', 1], summer: ['season', 2], autumn: ['season', 3], winter: ['season', 4], sakura: ['season', 5],
+	morning: ['time', 1], midday: ['time', 2], evening: ['time', 3], night: ['time', 4],
+	g1: ['grade', 100], g2: ['grade', 200], g3: ['grade', 300], op: ['grade', 400]
+};
+function racedefFor(names) {
+	return (names || '').split(',').filter(x => x).reduce((def, name) => {
+		if (!(name.toLowerCase() in RACE_CONDITIONS)) {
+			console.error(`--race: no such condition '${name}' (${Object.keys(RACE_CONDITIONS).join(' ')})`);
+			process.exit(1);
+		}
+		const [field, value] = RACE_CONDITIONS[name.toLowerCase()];
+		return {...def, [field]: value};
+	}, DEFAULT_RACEDEF);
+}
+// uniqueSkillForUma() from components/HorseDefTypes.ts
+const uniqueSkillFor = (outfitId, starCount) =>
+	(10000 * (1 + 9 * +(starCount > 2)) + 10000 * (+outfitId.slice(-2) - 1) + +outfitId.slice(1,-2) * 10 + 1).toString();
+
+function stateFromTree(tree, courseId, strategy, racedef) {
+	const {stats, aptitudes} = tree.uma;
+	const course = courses[courseId];
+	const outfitId = String(stats.CardId);
+	// a group only gets one slot in SkillSet(), so learned tiers go in worst-first and the best one wins it
+	const owned = tree.acquired_skills.map(s => String(s.skillId)).filter(id => id in skilldata)
+		.sort((a, b) => skillGroups.get(skillmeta[a].groupId).indexOf(a) - skillGroups.get(skillmeta[b].groupId).indexOf(b));
+	// 1-2★ uniques have a different id than 3★+ ones; go by whichever the uma actually owns
+	const starCount = owned.includes(uniqueSkillFor(outfitId, 1)) ? 1 : 3;
+	const unique = tree.acquired_skills.find(s => String(s.skillId) == uniqueSkillFor(outfitId, starCount));
+	const outfit = umas[stats.CharaId].outfits[outfitId];
+	strategy = strategy || STRATEGIES[outfit.strategy];
+	const apt = i => aptitudes[APTITUDES[i]].grade;
+	return {
+		name: `${umas[stats.CharaId].name[1]} ${outfit.epithet}`,
+		courseId, seed: DEFAULT_SEED, usePosKeep: true, useCompeteTop: true, useIntChecks: false,
+		racedef,
+		uma1: {
+			outfitId, starCount, strategy,
+			speed: stats.Speed, stamina: stats.Stamina, power: stats.Power, guts: stats.Guts, wisdom: stats.Wiz,
+			// the ten grades the game reports collapse to the three the sim wants (HorseDef.tsx)
+			distanceAptitude: apt(course.distanceType - 1),
+			surfaceAptitude: apt(7 + course.surface),
+			strategyAptitude: apt(4 + STRATEGIES.indexOf(strategy.replace('Oonige', 'Nige')) - 1),
+			skills: owned,
+			uniqueLv: unique ? unique.currentLevel : 1,
+			mood: stats.Motivation - 3,  // 1..5 in game, -2..2 here
+			popularity: 1
+		}
+	};
+}
+
 function deserializeUma(o) {
 	return {
 		mood: 2, popularity: 1, starCount: 3, uniqueLv: 1, ...o,
@@ -201,27 +270,48 @@ if (argv.includes('--selfcheck')) {
 		eq(inGroup20002({skills: new Map([['20002','200021']])}), 0, 'owning ◎ hides it and the ○ below it'),
 		eq(chartSkills({chartMode: 'all'}, {skills: new Map()})
 			.filter(id => availableSkills({buyable_skills: [{skillId: 200022, discountedCost: 62}]}).has(id))
-			.join(), '200022', 'numeric skillIds from the tree match the string ids used here')
+			.join(), '200022', 'numeric skillIds from the tree match the string ids used here'),
+		// Mayano Top Gun [Scramble☆Zone] (CardId 102401, unique 100241) on Tokyo turf 2400m, which is a
+		// medium-distance course, so the aptitudes the sim gets are #2 (medium), #8 (turf) and #6 (sasi).
+		...(uma1 => [
+			eq(skillSet(uma1.skills).get('20166'), '201662', 'the better of two learned tiers wins the group slot'),
+			eq(uma1.starCount, 3, 'owning the 3★ form of the unique means the uma is 3★+'),
+			eq(uma1.uniqueLv, 5, 'unique level comes from the acquired skill'),
+			eq(uma1.mood, 2, 'motivation 5 is mood +2'),
+			eq(uma1.distanceAptitude, 'B', 'medium distance is aptitude #2'),
+			eq(uma1.surfaceAptitude, 'S', 'turf is aptitude #8'),
+			eq(uma1.strategyAptitude, 'F', 'sasi is aptitude #6')
+		])(stateFromTree({
+			acquired_skills: [{skillId: 100241, currentLevel: 5}, {skillId: 201662}, {skillId: 201661}],
+			uma: {
+				stats: {CharaId: 1024, CardId: 102401, Speed: 1214, Stamina: 1186, Power: 915, Guts: 972, Wiz: 674, Motivation: 5},
+				aptitudes: Object.fromEntries(APTITUDES.map((n, i) => [n, {grade: 'SABCDEFGSA'[i]}]))
+			}
+		}, 10606, 'Sasi', racedefFor('summer,heavy')).uma1)
 	].every(x => x);
 	console.log(ok ? 'ok' : 'FAILED');
 	process.exit(+!ok);
 }
 
+const VALUE_FLAGS = ['--nsamples', '--top', '--skills', '--course', '--strategy', '--race'];
 let input = null;
 for (let i = 0; i < argv.length && input == null; ++i) {
-	if (argv[i] == '--nsamples' || argv[i] == '--top' || argv[i] == '--skills') ++i;  // skip the value
+	if (VALUE_FLAGS.includes(argv[i])) ++i;  // skip the value
 	else if (!argv[i].startsWith('-')) input = argv[i];
 }
-if (input == null) {
+const arg = name => argv.indexOf(name) > -1 ? argv[argv.indexOf(name) + 1] : null;
+const flag = (name, default_) => arg(name) != null ? parseInt(arg(name), 10) : default_;
+const tree = arg('--skills') && JSON.parse(fs.readFileSync(arg('--skills'), 'utf8'));
+const available = tree ? availableSkills(tree) : null;
+
+if (input == null && !(tree && tree.uma && arg('--course') && argv.includes('--chart'))) {
 	console.error('usage: node cli.mjs <share url | #hash | state.json> [--chart] [--nsamples N] [--top N] [--skills F] [--json]');
+	console.error('       node cli.mjs --skills F --course ID --chart [--strategy S] [--race C,C] [--top N] [--json]');
 	process.exit(1);
 }
-const flag = (name, default_) => argv.indexOf(name) > -1 ? parseInt(argv[argv.indexOf(name) + 1], 10) : default_;
-const available = argv.includes('--skills')
-	? availableSkills(JSON.parse(fs.readFileSync(argv[argv.indexOf('--skills') + 1], 'utf8')))
-	: null;
 
-const o = await loadState(input);
+const o = input != null ? await loadState(input)
+	: stateFromTree(tree, flag('--course'), arg('--strategy'), racedefFor(arg('--race')));
 const course = courses[o.courseId];
 course.slopes.sort((a, b) => a.start - b.start);  // CourseHelpers.getCourse()
 const uma1 = deserializeUma(o.uma1);
@@ -231,7 +321,14 @@ const options = {
 	useCompeteTop: o.useCompeteTop ?? true,
 	useIntChecks: o.useIntChecks || false
 };
-const header = `course ${o.courseId} (${course.distance}m) · seed ${options.seed}`;
+const header = `${o.name ? o.name + ' · ' : ''}course ${o.courseId} (${course.distance}m) · seed ${options.seed}`;
+if (input == null) process.stderr.write(
+	`${uma1.strategy} ${uma1.speed}/${uma1.stamina}/${uma1.power}/${uma1.guts}/${uma1.wisdom}` +
+	` (${uma1.distanceAptitude}${uma1.surfaceAptitude}${uma1.strategyAptitude}), unique lv${uma1.uniqueLv},` +
+	` ${uma1.skills.size} skills already learned · ` +
+	Object.entries(o.racedef).map(([field, v]) =>
+		Object.keys(RACE_CONDITIONS).find(name => RACE_CONDITIONS[name][0] == field && RACE_CONDITIONS[name][1] == v)
+	).join('/') + '\n');
 
 if (argv.includes('--chart')) {
 	let skills = chartSkills({chartMode: 'all', ...o}, uma1);
