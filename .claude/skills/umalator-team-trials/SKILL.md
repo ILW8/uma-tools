@@ -56,6 +56,21 @@ The winner's partial build carries into phase 2, so screening the losing styles 
 bashin-per-SP, then re-charts with that skill owned. Repeats until nothing clears `--min-gain` or SP
 runs out. Runners-up print under each pick — that's where you see which skills just became worthless.
 
+Candidates are priced as the whole **prerequisite chain** they force you to buy, not the single skill.
+`cli.mjs` charts and prices each skill alone, so without this a build claims SP it doesn't have —
+measured, a 13-skill long build hid 538 SP of prereqs and reported 702 SP left when the real number was
+164. The chain comes from `skill_meta.json`: within a `groupId`, `order` ranks strongest-first, so
+anything ordered after a skill in its group sits below it in the tree (Concentration ← Focus,
+Unstoppable ← On the Attack, every ◎ ← its ○). Chains run up to 3 deep (Muddy ○ → Muddy ◎ → Maestro of
+the Mud); the × members sort last but are never in `buyable_skills`, so they drop out on their own.
+
+A chain is ranked on the **top** skill's gain alone. The lower tiers have effects too, but they're
+charted against the same baseline and are usually partial substitutes, so summing would oversell. That
+undersells a chain, which self-corrects — once greedy buys a lower tier on its own merits, the tier
+above reprices to its own SP and jumps the ranking. In practice this is what happens: the long build
+above bought all five whites unprompted and paid zero bundle premium. It also demotes gold skills whose
+white is dead weight — Breath of Fresh Air went from pick #1 at a fake 153 SP to pick #17 at a real 306.
+
 **Phase 3 — verify.** Simulates the finished build against the unbuilt uma and compares the measured
 total to the sum of the marginals. They should agree within ~25%; a warning means the greedy path
 probably isn't near-optimal for that uma.
@@ -63,8 +78,11 @@ probably isn't near-optimal for that uma.
 ## Reading the output
 
 - **Leftover SP with a warning** means the hint list is the constraint, not SP. Don't hunt for filler.
-- **A skill that ranks well every round but never gets bought** shares a skill group with something
-  already purchased (e.g. On the Attack vs Unstoppable). Correct — don't buy both.
+- **A skill that ranks well every round but never gets bought** is a substitute for one already owned —
+  it overlaps the effect without sharing a group (Straightaway Recovery vs Deep Breaths, both recovery).
+  Group-mates are the opposite case: they're prerequisites, so you buy *both*, lower tier first.
+- **`+N prereq` on a runner-up** means its SP column is the chain price, not the skill's own cost. The
+  skill reappears at its own price once the tier below it is bought.
 - **Marginal, not standalone.** The column is the gain *given everything above it*. You cannot reorder
   the list and keep the numbers.
 
@@ -120,3 +138,6 @@ tell you the *weights* have gone stale. Re-check the source if results look off.
 
 `cli.mjs --dumpstate`, which prints the built state and exits so two of them can be spliced into one
 compare state. If it's missing, this skill's head-to-head phases can't run.
+
+`skill_meta.json` with `groupId` and `order` on every entry — that's the only source for prerequisites.
+`--selfcheck` asserts both fields exist and that the Outer Post ◎/○ pair still orders strongest-first.

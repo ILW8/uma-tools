@@ -68,6 +68,13 @@ if (has('--selfcheck')) {
 	// cli.mjs must still support the flags we drive it with
 	for (const f of ['--dumpstate', '--chart', '--skills', '--json'])
 		if (!readFileSync(path.join(DIR, 'cli.mjs'), 'utf8').includes(f)) { console.error(`cli.mjs has no ${f}`); bad++; }
+	// prereq pricing reads groupId/order out of skill_meta.json
+	const sm = JSON.parse(readFileSync(path.join(DIR, 'skill_meta.json'), 'utf8'));
+	if (!Object.values(sm).every(v => v.groupId != null && v.order != null))
+		{ console.error('skill_meta.json entries are missing groupId/order — prereqs cannot be priced'); bad++; }
+	// the ◎/○ pair that proves the order-within-group rule still holds
+	if (!(sm['200261']?.order < sm['200262']?.order && sm['200261'].groupId == sm['200262'].groupId))
+		{ console.error('skill_meta.json: Outer Post Proficiency ◎/○ no longer order strongest-first in one group'); bad++; }
 	console.log(bad ? `selfcheck FAILED (${bad})` : `selfcheck ok — ${TYPES.map(t => `${t}:${COURSES[t].length}`).join(' ')}`);
 	process.exit(bad ? 1 : 0);
 }
@@ -108,6 +115,30 @@ const baseTree = JSON.parse(readFileSync(treeFile, 'utf8'));
 if (!baseTree.uma) { console.error(`${treeFile} has no "uma" block — need an UmaExtractor skill_tree.json`); process.exit(1); }
 const names = JSON.parse(readFileSync(path.join(DIR, 'skillnames.json'), 'utf8'));
 const nameOf = id => names[id]?.at(-1) ?? id;
+
+// --- prerequisites ----------------------------------------------------------
+// The game gates the upgraded skill in a group behind the ones below it: Concentration needs Focus,
+// Unstoppable needs On the Attack, every ◎ needs its ○. cli.mjs charts and prices each skill alone, so
+// without this a build reports hundreds of SP it does not actually have (measured: 538 SP of hidden
+// prereqs on a 13-skill long build, i.e. 702 SP "left" that was really 164).
+// skill_meta's `order` ranks a group strongest-first, so anything ordered after a skill in the same
+// group is below it in the tree. Chains run up to 3 deep (Muddy ○ -> Muddy ◎ -> Maestro of the Mud).
+// The × members sit last but are never in buyable_skills, so they drop out on their own.
+const meta = JSON.parse(readFileSync(path.join(DIR, 'skill_meta.json'), 'utf8'));
+const GROUP = new Map();
+for (const [id, v] of Object.entries(meta)) {
+	if (!GROUP.has(v.groupId)) GROUP.set(v.groupId, []);
+	GROUP.get(v.groupId).push(id);
+}
+// still-unbought skills that must be purchased before `id`, cheapest tier first
+function prereqs(id, buyable) {
+	const v = meta[id];
+	if (!v) return [];
+	return GROUP.get(v.groupId)
+		.filter(i => meta[i].order > v.order && buyable.has(i))
+		.sort((a, b) => meta[b].order - meta[a].order)
+		.map(i => ({id: i, name: nameOf(i), spcost: buyable.get(i).discountedCost}));
+}
 
 const scratch = mkdtempSync(path.join(tmpdir(), 'umalator-'));
 const scratchFile = n => path.join(scratch, n);
@@ -161,10 +192,13 @@ const newBuild = name => ({
 });
 
 function printPick(pick, n) {
-	console.log(`${String(n).padStart(2)}. ${pick.wmean.toFixed(3).padStart(7)} bashin  ${String(pick.spcost).padStart(4)} SP  ${pick.name}`);
+	console.log(`${String(n).padStart(2)}. ${pick.wmean.toFixed(3).padStart(7)} bashin  ${String(pick.total).padStart(4)} SP  ${pick.name}`);
+	// the SP above is the whole chain, so name what the rest of it bought
+	for (const d of pick.deps)
+		console.log(`         ${(d.wmean ?? 0).toFixed(3).padStart(7)}  ${String(d.spcost).padStart(4)} SP  prereq       ${d.name}`);
 	// runners-up matter: they show which skills are substitutes for the one just taken
 	for (const r of pick.runnersUp)
-		console.log(`         ${r.wmean.toFixed(3).padStart(7)}  ${String(r.spcost).padStart(4)} SP  ${r.perSp.toFixed(5)}/SP  ${r.name}`);
+		console.log(`         ${r.wmean.toFixed(3).padStart(7)}  ${String(r.total).padStart(4)} SP  ${r.perSp.toFixed(5)}/SP  ${r.name}${r.deps.length ? ` (+${r.deps.length} prereq)` : ''}`);
 }
 
 // buy up to maxRounds more skills into `b`; returns false once nothing clears MIN_GAIN or SP.
@@ -173,17 +207,30 @@ function greedy(b, strategy, maxRounds, verbose) {
 	let exhausted = false;
 	for (let i = 0; i < maxRounds; i++) {
 		writeFileSync(b.file, JSON.stringify(b.tree));
-		const ranked = [...chartRound(b.file, strategy)]
-			.map(([id, e]) => ({id, name: nameOf(id), ...e, perSp: e.wmean / e.spcost}))
-			.filter(r => r.spcost <= b.budget && r.wmean >= MIN_GAIN)
+		const buyable = new Map(b.tree.buyable_skills.map(s => [String(s.skillId), s]));
+		const agg = chartRound(b.file, strategy);
+		// price and rank each candidate as the whole chain it forces you to buy. The chain's lower tiers
+		// have effects of their own, but they're charted alone against the same baseline and are usually
+		// partial substitutes for the top skill, so summing would oversell — rank on the top skill's gain
+		// only. That undersells a chain, which self-corrects: once greedy buys a lower tier on its own
+		// merits, the tier above it reprices to its own SP and jumps the ranking next round.
+		const ranked = [...agg]
+			.map(([id, e]) => {
+				const deps = prereqs(id, buyable).map(d => ({...d, wmean: agg.get(d.id)?.wmean}));
+				const total = e.spcost + deps.reduce((a, d) => a + d.spcost, 0);
+				return {id, name: nameOf(id), ...e, deps, total, perSp: e.wmean / total};
+			})
+			.filter(r => r.total <= b.budget && r.wmean >= MIN_GAIN)
 			.sort((x, y) => y.perSp - x.perSp);
 		if (!ranked.length) { exhausted = true; break; }
 
 		const pick = {...ranked[0], runnersUp: ranked.slice(1, TOP)};
-		b.budget -= pick.spcost;
+		b.budget -= pick.total;
 		b.bought.push(pick);
-		b.tree.acquired_skills.push({skillId: Number(pick.id), name: pick.name, currentLevel: 1});
-		b.tree.buyable_skills = b.tree.buyable_skills.filter(s => String(s.skillId) !== pick.id);
+		const chain = [...pick.deps, pick];
+		for (const s of chain) b.tree.acquired_skills.push({skillId: Number(s.id), name: s.name, currentLevel: 1});
+		const gone = new Set(chain.map(s => s.id));
+		b.tree.buyable_skills = b.tree.buyable_skills.filter(s => !gone.has(String(s.skillId)));
 		if (verbose) printPick(pick, b.bought.length);
 	}
 	writeFileSync(b.file, JSON.stringify(b.tree));
@@ -235,7 +282,8 @@ greedy(build, strategy, Infinity, true);
 
 const {budget, bought} = build;
 const spent = baseTree.uma.stats.SkillPoint - budget;
-console.log(`\n${bought.length} skills · ${spent} SP spent · ${budget} left`);
+const nskills = bought.reduce((a, p) => a + 1 + p.deps.length, 0);
+console.log(`\n${nskills} skills (${bought.length} picks + ${nskills - bought.length} prereqs) · ${spent} SP spent · ${budget} left`);
 if (budget > 150) console.log(`! ${budget} SP has nothing left worth >= ${MIN_GAIN} bashin — the hint list is the constraint, not SP`);
 
 // --- phase 3: verify the whole build against the unbuilt uma ----------------
@@ -247,7 +295,9 @@ console.log(`\n${at()} === verify (built vs unbuilt, both ${strategy}) ===`);
 const {wmean, wahead, rows} = await headToHead(treeFile, strategy, build.file, strategy);
 for (const r of rows)
 	console.log(`  ${r.label.padEnd(17)} ${r.w.toFixed(1).padStart(5)}%  ${r.mean.toFixed(2).padStart(7)} bashin  built ahead ${r.ahead.toFixed(1).padStart(5)}%`);
-const predicted = bought.reduce((a, b) => a + b.wmean, 0);
+// prereqs are in the built uma too, so credit them at the gain they charted alone — an upper bound
+// where they overlap the skill above them, which is why this is only checked against a +/-25% band
+const predicted = bought.reduce((a, b) => a + b.wmean + b.deps.reduce((x, d) => x + (d.wmean ?? 0), 0), 0);
 console.log(`\nmeasured ${wmean.toFixed(2)} bashin (predicted ${predicted.toFixed(2)} from the marginals), ahead in ${wahead.toFixed(1)}% of races`);
 if (Math.abs(wmean - predicted) > Math.max(1, 0.25 * predicted))
 	console.log('! measured and predicted disagree by >25% — the greedy path is probably not near-optimal here');
