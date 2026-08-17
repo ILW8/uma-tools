@@ -70,8 +70,8 @@ probably isn't near-optimal for that uma.
 
 ## Runtime
 
-Measured on 32 cores, `long --strategy Senkou --min-gain 1`: **~109s** — 85s greedy charting (4 rounds ×
-12 courses), 19–26s verify. Add roughly `--screen-rounds` × 21s for each style that loses the screen (the
+Measured on 32 cores, `long --strategy Senkou --min-gain 1`: **97s** — 87s greedy charting (4 rounds ×
+12 courses), 10s verify. Add roughly `--screen-rounds` × 21s for each style that loses the screen (the
 winner's rounds are reused, not repeated), which is what dominates a run that doesn't pass `--strategy`.
 Phase headers print elapsed seconds, so attribute before tuning. Charting repeats to the second; the
 verify is 12 single-threaded compares racing, so it's the phase that moves run to run.
@@ -81,7 +81,8 @@ out (course, skill) pairs to the pool on demand, and the compare phases (screen,
 per core. Compare doesn't scale linearly — it's bounded by its slowest single course (~1.8× the mean),
 so 6.8× on 12 courses, not 12×.
 
-Charting is ~78% of a run, and `--min-gain` is what buys whole extra chart rounds, so lower it last.
+Charting is ~90% of a `--strategy` run, and `--min-gain` is what buys whole extra chart rounds, so lower
+it last. Verify is not where the time goes — 20% of a run at the old `--nsamples 1000`, 11% at 600.
 `--nsamples`/`--screen-samples` only shrink the compare phases, and what you pay is the count you asked
 for **plus** a full throwaway run at every rung below it — `doCompare()` re-runs the whole comparison at
 20, 120, 600, 2400 to refresh the website's graph as it sharpens, and headless every one of those is
