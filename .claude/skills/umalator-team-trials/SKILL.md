@@ -31,6 +31,7 @@ Run it from the repo root or `umalator-global/`; otherwise pass `--dir path/to/u
 | `--strategy S` | skip the style screen and optimize this one |
 | `--strategies A,B` | screen only these (default: every style at aptitude B or better) |
 | `--race C,C` | conditions, passed to `cli.mjs` (default `firm,sunny,spring,midday,g1`) |
+| `--dist D,D` | only courses of these distances (e.g. `--dist 2000`); default is the whole type |
 | `--min-gain N` | stop buying below this weighted bashin (default 0.05) |
 | `--top N` | runners-up to print per round (default 6) |
 | `--nsamples N` | samples for the final verify (default 600) |

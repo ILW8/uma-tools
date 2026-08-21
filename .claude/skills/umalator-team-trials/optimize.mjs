@@ -90,7 +90,9 @@ if (!treeFile || !rawType) {
 const type = rawType.toLowerCase();
 if (!TYPES.includes(type)) { console.error(`race type must be one of ${TYPES.join('|')}`); process.exit(1); }
 
-const courses = COURSES[type];
+const DIST = arg('--dist');  // e.g. --dist 2000: only 2000m courses of the type
+const courses = COURSES[type].filter(([,,l]) => !DIST || DIST.split(',').includes(l.match(/[0-9]+/)[0]));
+if (!courses.length) { console.error(`--dist ${DIST}: no ${type} courses at that distance`); process.exit(1); }
 const WSUM = courses.reduce((a, [, w]) => a + w, 0);
 const RACE = arg('--race');
 const MIN_GAIN = parseFloat(arg('--min-gain', '0.05'));
