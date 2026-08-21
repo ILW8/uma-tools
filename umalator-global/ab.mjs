@@ -1,5 +1,5 @@
 // Deep A/B: run the same worker messages through the committed simulator.worker.js and a rebuilt
-// bundle (see ab-build.mjs), and require EVERY postMessage payload bit-identical — all samples,
+// bundle (see build-worker.mjs), and require EVERY postMessage payload bit-identical — all samples,
 // runData, Maps included. This is the regression suite for engine changes in uma-skill-tools:
 // same seed, same messages, same bytes out. The cases cover compare/chart/hpcalc across courses,
 // strategies (incl. Oonige itidoriarasoi), wisdom checks, unique levels, and debuffs.

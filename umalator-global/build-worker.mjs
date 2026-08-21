@@ -1,9 +1,9 @@
 // Build umalator/simulator.worker.ts to an arbitrary outfile, replicating build.mjs's options
 // (minify, defines, node:assert stub, data redirects) without touching the shipped artifacts.
-// Pair with ab.mjs to check a build against the committed bundle, or run it via
-// UMALATOR_WORKER=<outfile> node cli.mjs ...
+// The usual use is driving cli.mjs with a fresh build: UMALATOR_WORKER=<outfile> node cli.mjs ...
+// ab.mjs uses it too, to check a build against the committed bundle.
 //
-// usage: node ab-build.mjs <outfile> [--debug]
+// usage: node build-worker.mjs <outfile> [--debug]
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as esbuild from 'esbuild';
@@ -12,7 +12,7 @@ const dir = path.dirname(fileURLToPath(import.meta.url));
 const outfile = process.argv.slice(2).find(a => !a.startsWith('--'));
 const debug = process.argv.includes('--debug');
 if (!outfile) {
-	console.error('usage: node ab-build.mjs <outfile> [--debug]');
+	console.error('usage: node build-worker.mjs <outfile> [--debug]');
 	process.exit(1);
 }
 
