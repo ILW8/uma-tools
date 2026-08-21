@@ -119,6 +119,17 @@ function runToFinish(s: RaceSolver, distance: number, skillPos: Map<string,any>)
 	return {t, p, v, hp, tt, tp, sk, sdly, dh, spurt};
 }
 
+// racedefToParams() in umalator/app.tsx has the same table; chart mode resolves the band there because it
+// only ever has one uma, a compare has to resolve it per side.
+const ORDER_RANGE_FOR_STRATEGY = Object.freeze({
+	'Nige': [1,1], 'Senkou': [2,4], 'Sasi': [5,9], 'Oikomi': [5,9], 'Oonige': [1,1]
+});
+
+function orderForStrategy(b: RaceSolverBuilder, racedef: RaceParameters, uma: HorseState) {
+	const range = racedef.orderRange ?? ORDER_RANGE_FOR_STRATEGY[uma.strategy];
+	if (range != null) b.order(range[0], range[1]).numUmas(racedef.numUmas ?? 9);
+}
+
 export function runComparison(nsamples: number, course: CourseData, racedef: RaceParameters, uma1: HorseState, uma2: HorseState, seed: [number,number], options, baseline?: {traces: Trace[] | null}) {
 	// with the baseline uma's races cached, uma1 is neither built nor simulated (see simulator.worker.ts)
 	const cached = baseline != null && baseline.traces != null && baseline.traces.length >= nsamples
@@ -130,12 +141,15 @@ export function runComparison(nsamples: number, course: CourseData, racedef: Rac
 		.weather(racedef.weather)
 		.season(racedef.season)
 		.time(racedef.time);
-	if (racedef.orderRange != null) {
-		standard
-			.order(racedef.orderRange[0], racedef.orderRange[1])
-			.numUmas(racedef.numUmas);
-	}
+	// Order conditions are checked against a static band for where the uma sits in the pack, not against a
+	// simulated position, and the two sides of a compare can be running different strategies: order==1
+	// (Angling and Scheming) is real for a front runner and impossible for a pace chaser. So the band has to
+	// be per uma, applied after the fork — before this, a null band silently dropped every order condition
+	// and both sides fired front-runner skills. An explicit racedef.orderRange still wins for both, which is
+	// what chart mode passes.
 	const compare = standard.fork();
+	orderForStrategy(standard, racedef, uma1);
+	orderForStrategy(compare, racedef, uma2);
 	if (cached != null) standard = null;
 	standard?.horse(uma1).otherHorse(uma2);
 	compare.horse(uma2).otherHorse(uma1);
