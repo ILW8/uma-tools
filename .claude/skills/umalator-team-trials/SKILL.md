@@ -101,9 +101,10 @@ probably isn't near-optimal for that uma.
 
 ## Runtime
 
-Measured on 32 cores, `long --strategy Senkou --min-gain 1`: **97s** — 87s greedy charting (4 rounds ×
-12 courses), 10s verify. Add roughly `--screen-rounds` × 21s for each style that loses the screen (the
-winner's rounds are reused, not repeated), which is what dominates a run that doesn't pass `--strategy`.
+Measured on 32 cores against the committed bundle, i.e. before the baseline cache below,
+`long --strategy Senkou --min-gain 1`: **97s** — 87s greedy charting (4 rounds × 12 courses), 10s
+verify. Add roughly `--screen-rounds` × 21s for each style that loses the screen (the winner's rounds
+are reused, not repeated), which is what dominates a run that doesn't pass `--strategy`.
 Phase headers print elapsed seconds, so attribute before tuning. Charting repeats to the second; the
 verify is 12 single-threaded compares racing, so it's the phase that moves run to run.
 
@@ -125,11 +126,16 @@ Two things measured and not worth doing. Stripping the simulator's telemetry arr
 profile puts ~92% of a run in physics (`step`, `updateTargetSpeed`, `processSkillActivations`,
 `hpPerSecond`) and GC at 1.1%. Pruning low-scoring candidates across greedy rounds: the chart's own
 sampling ladder already spends only 16% of a round on the candidates that die at 20 samples, and dropping
-them makes the work queue too shallow to balance. What is left is worth **1.9×** — chart mode
-re-simulates the unchanged baseline uma once per candidate, and that run measures bit-identical across
-candidates (except for candidates that debuff, which have to fall back). It needs an engine change in
-`uma-skill-tools/` — feasible now that the worker builds from TS (see `build-worker.mjs`), just not
-done yet.
+them makes the work queue too shallow to balance.
+
+One thing that was worth doing, and is done. Chart mode used to re-simulate the unchanged baseline uma once
+per candidate, which is half of every round; `umalator/compare.ts` now caches the baseline's races and
+replays them, so a round simulates it once. **~1.95×** inside the worker and **1.7×** end to end over a
+523-candidate one-course chart (21.3s → 12.3s on 32 cores, and 10.6s → 6.4s for the same chart on a nige
+uma), for byte-identical output. This is the reason the build step in Usage matters — the committed bundle
+predates it. Two kinds of candidate opt out and run at the old speed: debuffs, which really do change the
+baseline uma's race, and skills the uma already owns, which don't shift the builder's rng the way the rest
+of the candidates do.
 
 ## Assumptions baked in
 

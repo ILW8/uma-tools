@@ -4,6 +4,10 @@ Headless umalator-global. It loads the committed `simulator.worker.js` — the e
 ships — into a `vm` context with `self`/`postMessage` shimmed, so there is no build step and no browser.
 No dependencies; run on Node 22 (it wants `DecompressionStream` and `os.availableParallelism`).
 
+`UMALATOR_WORKER=<path>` runs a fresh build of `umalator/simulator.worker.ts` (see `build-worker.mjs`)
+instead. Same numbers, but ~1.7x faster in chart mode: it reuses the baseline uma's races across
+candidates, which the committed bundle predates.
+
 ```
 node cli.mjs <share url | #hash | state.json> [--chart] [--nsamples N] [--top N] [--skills F] [--json]
 node cli.mjs --skills F --course ID --chart [--strategy S] [--race C,C] [--top N] [--json]

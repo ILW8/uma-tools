@@ -7,6 +7,7 @@ import { runComparison } from './compare';
 import { runHpCalc } from './hpcalc';
 
 import skillmeta from '../skill_meta.json';
+import skilldata from '../uma-skill-tools/data/skill_data.json';
 
 function mergeResults(results1, results2) {
 	console.assert(results1.id == results2.id, `mergeResults: ${results1.id} != ${results2.id}`);
@@ -37,12 +38,51 @@ function mergeResultSets(data1, data2) {
 	});
 }
 
-function run1Round(nsamples: number, skills: string[], course: CourseData, racedef: RaceParameters, uma: HorseState, seed: [number,number], options) {
+// Every candidate in a round is charted against the same unchanged uma over the same samples, and that
+// baseline is half the work of the round (it is also 50% of all solver steps). Candidates are added to the
+// baseline's builder from Perspective.Other, which applies only the effects that target someone other than
+// their own uma (isTargetedEffect), so a candidate that merely buffs itself changes nothing about the
+// baseline's race. Cache it and let every such candidate replay it.
+//
+// The cache needs the baseline to be not just unaffected but identical, and two things break that:
+//   - an effect that targets someone else (a debuff) really does apply to the baseline uma.
+//     ActivateRandomGold ignores the target filter, so it counts too.
+//   - how many draws the candidate costs the builder's rng. Trigger seeds are drawn one per unique skill
+//     id in order, so a candidate shifts the seed of everything added after it. asitame and staminasyoubu
+//     sample immediately and don't care; itidoriarasoi ((oo)nige) samples randomly and does. Adding a
+//     skill and replacing one in its group both cost exactly one draw, which is why they can share a
+//     baseline — charting a skill the uma already owns costs none, so it races its own. Wisdom checks
+//     would break this too (one rng per skill id, shared across perspectives), and are off in chart mode.
+const isInert = (id: string) => id in skilldata &&
+	skilldata[id].alternatives.every(a => a.effects.every(e => e.target == 1 && e.type != 37));
+
+function baselineCacheable(uma: HorseState, id: string, options) {
+	if (options.useIntChecks) return false;
+	const replaced = uma.skills.get(skillmeta[id].groupId);
+	if (replaced == id) return false;  // uma2 is uma1: nothing is added, so this one costs no extra draw
+	return isInert(id) && (replaced == null || isInert(replaced));
+}
+
+// cli.mjs charts one candidate per message, so the cache has to outlive the message. Keyed on everything
+// but the candidate list, and only one key at a time, which bounds it to one uma/course's traces.
+let cacheKey = null;
+const cacheRounds = new Map();
+function baselineCache({course, racedef, uma, options}) {
+	const key = JSON.stringify([course, racedef, uma, options], (_,v) => v instanceof Map ? [...v] : v);
+	if (key != cacheKey) {
+		cacheKey = key;
+		cacheRounds.clear();
+	}
+	return round => cacheRounds.get(round) || cacheRounds.set(round, {traces: null}).get(round);
+}
+
+function run1Round(nsamples: number, skills: string[], course: CourseData, racedef: RaceParameters, uma: HorseState, seed: [number,number], options, baseline?) {
 	const data = new Map();
 	skills.forEach(id => {
 		const withSkill = {...uma, skills: new Map(uma.skills.entries())};
 		withSkill.skills.set(skillmeta[id].groupId, id);
-		const {results, runData} = runComparison(nsamples, course, racedef, uma, withSkill, seed, options);
+		const {results, runData} = runComparison(nsamples, course, racedef, uma, withSkill, seed, options,
+			baselineCacheable(uma, id, options) ? baseline : undefined);
 		const mid = Math.floor(results.length / 2);
 		const median = results.length % 2 == 0 ? (results[mid-1] + results[mid]) / 2 : results[mid];
 		const mean = results.reduce((a,b) => a+b, 0) / results.length;
@@ -59,20 +99,27 @@ function run1Round(nsamples: number, skills: string[], course: CourseData, raced
 
 function doChart({skills, course, racedef, uma, options}) {
 	const seedgen = new Rule30CARng(options.seed);
-	let results = run1Round(3, skills, course, racedef, uma, seedgen.pair(), options);
+	const cache = baselineCache({course, racedef, uma, options});
+	// every round draws its seed whether or not anything is left to chart, so a candidate's rounds line up
+	// with the same rounds of every other candidate, and with their cached baselines
+	const round = (n: number, ids: string[]) => {
+		const seed = seedgen.pair();
+		return run1Round(n, ids, course, racedef, uma, seed, options, cache(n + ':' + seed));
+	};
+	let results = round(3, skills);
 	postMessage({type: 'chart', results});
-	let update = run1Round(17, skills, course, racedef, uma, seedgen.pair(), options);
+	let update = round(17, skills);
 	mergeResultSets(results, update);
 	postMessage({type: 'chart', results});
 	skills = skills.filter(id => results.get(id).max > 0.1);
-	update = run1Round(30, skills, course, racedef, uma, seedgen.pair(), options);
+	update = round(30, skills);
 	mergeResultSets(results, update);
 	postMessage({type: 'chart', results});
 	skills = skills.filter(id => Math.abs(results.get(id).max - results.get(id).min) > 0.1);
-	update = run1Round(50, skills, course, racedef, uma, seedgen.pair(), options);
+	update = round(50, skills);
 	mergeResultSets(results, update);
 	postMessage({type: 'chart', results});
-	update = run1Round(100, skills, course, racedef, uma, seedgen.pair(), options);
+	update = round(100, skills);
 	mergeResultSets(results, update);
 	postMessage({type: 'chart', results});
 }

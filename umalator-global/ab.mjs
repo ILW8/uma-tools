@@ -2,7 +2,8 @@
 // bundle (see build-worker.mjs), and require EVERY postMessage payload bit-identical — all samples,
 // runData, Maps included. This is the regression suite for engine changes in uma-skill-tools:
 // same seed, same messages, same bytes out. The cases cover compare/chart/hpcalc across courses,
-// strategies (incl. Oonige itidoriarasoi), wisdom checks, unique levels, and debuffs.
+// strategies (incl. Oonige itidoriarasoi), wisdom checks, unique levels, and debuffs. The two chart cases
+// both exercise the baseline cache, the nige one on the strategy where it is riskiest.
 //
 // usage: node ab.mjs <rebuilt.worker.js> [--quick]
 import * as fs from 'node:fs';
@@ -116,6 +117,17 @@ cases.push({label: 'chart c10606', msg: 'chart', data: {
 	racedef: racedefToParams(RD, 'Senkou'),
 	uma: mkUma({...base, strategy: 'Senkou', skills: staples.slice(0, 3)}),
 	options: {seed: 2615953739, usePosKeep: true, useCompeteTop: true, useIntChecks: false}
+}});
+// nige chart: the strategy the baseline cache has the most to lose on, since itidoriarasoi samples its
+// trigger from the builder rng *after* the candidate is added. This case fails if baselineCacheable() lets
+// through a candidate that doesn't cost the builder exactly one draw, e.g. one the uma already owns (which
+// the staples in chartSkills cover).
+cases.push({label: 'chart c10606 nige', msg: 'chart', data: {
+	skills: chartSkills.slice(0, QUICK ? 8 : 15),
+	course: courseFor(10606),
+	racedef: racedefToParams(RD, 'Nige'),
+	uma: mkUma({...base, strategy: 'Nige', skills: staples.slice(0, 3)}),
+	options: {seed: 424242, usePosKeep: true, useCompeteTop: true, useIntChecks: false}
 }});
 // hpcalc case: probe the shipped worker for debuffs it can actually run (some skills use
 // conditions the engine doesn't implement and throw)

@@ -69,8 +69,61 @@ export function getDeactivator(selfSet: Map<string, [number,number]>, otherSet: 
 	};
 }
 
-export function runComparison(nsamples: number, course: CourseData, racedef: RaceParameters, uma1: HorseState, uma2: HorseState, seed: [number,number], options) {
-	const standard = new RaceSolverBuilder(nsamples)
+// One sample of one uma: everything the chart draws, plus a few frames past the finish line. Two umas are
+// compared at the moment the first of them crosses the line, so the other one's position there has to be
+// available, and it can cross up to a frame or two later. Running past the line is free: RaceSolver only
+// draws from the shared rng in its constructor, so extra frames can't desync the samples after this one.
+export type Trace = {
+	t: number[], p: number[], v: number[], hp: number[],  // as recorded up to the finish line
+	tt: number[], tp: number[],                           // time and position for TAIL frames past it
+	sk: Map<string,any>, sdly: number, dh: number, spurt: boolean
+};
+
+const TAIL = 3;
+
+const last = (a: number[]) => a[a.length-1];
+
+// position at the first frame at or after `time`. Infinity if even the tail doesn't reach it, which only
+// happens when this uma finished so much earlier that it cannot be the one behind.
+function posAt(tr: Trace, time: number) {
+	const i = tr.t.findIndex(t => t >= time);
+	if (i > -1) return tr.p[i];
+	const j = tr.tt.findIndex(t => t >= time);
+	return j > -1 ? tr.tp[j] : Infinity;
+}
+
+function runToFinish(s: RaceSolver, distance: number, skillPos: Map<string,any>): Trace {
+	const t = [], p = [], v = [], hp = [];
+	while (s.pos < distance) {
+		s.step(1/15);
+		t.push(s.accumulatetime.t);
+		p.push(s.pos);
+		v.push(s.currentSpeed + (s.modifiers.currentSpeed.acc + s.modifiers.currentSpeed.err));
+		hp.push((s.hp as GameHpPolicy).hp);
+	}
+	const sdly = s.startDelay, spurt = s.isLastSpurt && s.lastSpurtTransition == -1;
+	s.cleanup();
+	const dh = skillPos.get('downhill') || 0;
+	skillPos.delete('downhill');
+	// a level deeper than the old loop's new Map(): the tail below still writes into skillPos (deactivating
+	// a skill there has to find its activation record), and those writes are not part of this sample
+	const sk = new Map();
+	skillPos.forEach((v,k) => sk.set(k, v.map(r => r.slice())));
+	const tt = [], tp = [];
+	for (let i = 0; i < TAIL; ++i) {
+		s.step(1/15);
+		tt.push(s.accumulatetime.t);
+		tp.push(s.pos);
+	}
+	skillPos.clear();
+	return {t, p, v, hp, tt, tp, sk, sdly, dh, spurt};
+}
+
+export function runComparison(nsamples: number, course: CourseData, racedef: RaceParameters, uma1: HorseState, uma2: HorseState, seed: [number,number], options, baseline?: {traces: Trace[] | null}) {
+	// with the baseline uma's races cached, uma1 is neither built nor simulated (see simulator.worker.ts)
+	const cached = baseline != null && baseline.traces != null && baseline.traces.length >= nsamples
+		? baseline.traces : null;
+	let standard: RaceSolverBuilder | null = new RaceSolverBuilder(nsamples)
 		.seed(...seed)
 		.course(course)
 		.ground(racedef.groundCondition)
@@ -83,7 +136,8 @@ export function runComparison(nsamples: number, course: CourseData, racedef: Rac
 			.numUmas(racedef.numUmas);
 	}
 	const compare = standard.fork();
-	standard.horse(uma1).otherHorse(uma2);
+	if (cached != null) standard = null;
+	standard?.horse(uma1).otherHorse(uma2);
 	compare.horse(uma2).otherHorse(uma1);
 	const wisdomSeeds = new Map<string, [number,number]>();
 	const wisdomRng = new Rule30CARng(...seed);
@@ -98,7 +152,7 @@ export function runComparison(nsamples: number, course: CourseData, racedef: Rac
 	const u2id = uniqueSkillForUma(uma2.outfitId, uma2.starCount);
 	Array.from(uma1.skills.values()).sort(sort).forEach(id => {
 		wisdomSeeds.set(id, wisdomRng.pair());
-		standard.addSkill(id, Perspective.Self, id == u1id ? uma1.uniqueLv : 1, instantiateSamplePolicy(uma1.samplePolicies.get(id)));
+		standard?.addSkill(id, Perspective.Self, id == u1id ? uma1.uniqueLv : 1, instantiateSamplePolicy(uma1.samplePolicies.get(id)));
 	});
 	Array.from(uma2.skills.values()).sort(sort).forEach(id => {
 		// this means that the second set of rolls 'wins' for skills on both, but this doesn't actually matter
@@ -110,122 +164,88 @@ export function runComparison(nsamples: number, course: CourseData, racedef: Rac
 	// Other skills before its Self skills, which can cause skill desync issues when there are debuffs
 	// TODO i don't really like this, this might just be masking some deeper underlying issue.
 	uma1.skills.forEach(id => compare.addSkill(id, Perspective.Other, id == u1id ? uma1.uniqueLv : 1, instantiateSamplePolicy(uma1.samplePolicies.get(id))));
-	uma2.skills.forEach(id => standard.addSkill(id, Perspective.Other, id == u2id ? uma2.uniqueLv : 1, instantiateSamplePolicy(uma2.samplePolicies.get(id))));
-	standard.withAsiwotameru();
+	uma2.skills.forEach(id => standard?.addSkill(id, Perspective.Other, id == u2id ? uma2.uniqueLv : 1, instantiateSamplePolicy(uma2.samplePolicies.get(id))));
+	standard?.withAsiwotameru();
 	compare.withAsiwotameru();
 	if (!CC_GLOBAL) {
-		standard.withStaminaSyoubu();
+		standard?.withStaminaSyoubu();
 		compare.withStaminaSyoubu();
 	}
 	if (options.usePosKeep) {
-		standard.useDefaultPacer(); compare.useDefaultPacer();
+		standard?.useDefaultPacer(); compare.useDefaultPacer();
 	}
 	if (options.useCompeteTop) {
-		standard.withItidoriarasoi(); compare.withItidoriarasoi();
+		standard?.withItidoriarasoi(); compare.withItidoriarasoi();
 	}
 	if (options.useIntChecks) {
-		standard.withWisdomChecks(wisdomSeeds);
+		standard?.withWisdomChecks(wisdomSeeds);
 		compare.withWisdomChecks(wisdomSeeds);
 	}
 	const skillPos1 = new Map(), skillPos2 = new Map();
-	standard.onSkillActivate(getActivator(skillPos1, null));
-	standard.onSkillDeactivate(getDeactivator(skillPos1, null, course));
+	standard?.onSkillActivate(getActivator(skillPos1, null));
+	standard?.onSkillDeactivate(getDeactivator(skillPos1, null, course));
 	compare.onSkillActivate(getActivator(skillPos2, null));
 	compare.onSkillDeactivate(getDeactivator(skillPos2, null, course));
-	let a = standard.build(), b = compare.build();
-	let ai = 1, bi = 0;
-	let sign = 1;
+	let a = standard?.build(), b = compare.build();
+	const traces = [];
+	// `ref` is the uma whose crossing of the finish line the sample is measured at, and it has to be
+	// whichever one got there first: running the other past the finish would overestimate the difference,
+	// because for example a skill can continue past the end of the course. The old loop found this out by
+	// simulating the sample, checking, and re-simulating with the two umas swapped; both traces are complete
+	// here, so the same check costs a swap. Which uma it starts from carries over between samples, as then.
+	let ref = 1;
 	const diff = [];
 	let min = Infinity, max = -Infinity, estMean, estMedian, bestMeanDiff = Infinity, bestMedianDiff = Infinity;
 	let minrun, maxrun, meanrun, medianrun;
 	let nspurt = [0,0];
 	const sampleCutoff = Math.max(Math.floor(nsamples * 0.8), nsamples - 200);
-	let retry = false;
 	for (let i = 0; i < nsamples; ++i) {
-		const s1 = a.next(retry).value as RaceSolver;
-		const s2 = b.next(retry).value as RaceSolver;
-		const data = {t: [[], []], p: [[], []], v: [[], []], hp: [[], []], sk: [null,null], sdly: [0,0], dh: [0,0]};
+		const tr1 = cached != null ? cached[i] : runToFinish(a.next().value as RaceSolver, course.distance, skillPos1);
+		const tr2 = runToFinish(b.next().value as RaceSolver, course.distance, skillPos2);
+		if (cached == null) traces.push(tr1);
+		const tr = [tr1, tr2];  // uma1 is always index 0 and uma2 always index 1
 
-		while (s2.pos < course.distance) {
-			s2.step(1/15);
-			data.t[ai].push(s2.accumulatetime.t);
-			data.p[ai].push(s2.pos);
-			data.v[ai].push(s2.currentSpeed + (s2.modifiers.currentSpeed.acc + s2.modifiers.currentSpeed.err));
-			data.hp[ai].push((s2.hp as GameHpPolicy).hp);
+		let mark = posAt(tr[1-ref], last(tr[ref].t));
+		if (last(tr[ref].p) < mark || isNaN(mark)) {  // at most one of the two can fail this
+			ref = 1 - ref;
+			mark = posAt(tr[1-ref], last(tr[ref].t));
 		}
-		data.sdly[ai] = s2.startDelay;
+		const basinn = (ref == 1 ? 1 : -1) * (last(tr[ref].p) - mark) / 2.5;
 
-		while (s1.accumulatetime.t < s2.accumulatetime.t) {
-			s1.step(1/15);
-			data.t[bi].push(s1.accumulatetime.t);
-			data.p[bi].push(s1.pos);
-			data.v[bi].push(s1.currentSpeed + (s1.modifiers.currentSpeed.acc + s1.modifiers.currentSpeed.err));
-			data.hp[bi].push((s1.hp as GameHpPolicy).hp);
+		nspurt[0] += +tr1.spurt;
+		nspurt[1] += +tr2.spurt;
+		const data = {
+			t: [tr1.t, tr2.t], p: [tr1.p, tr2.p], v: [tr1.v, tr2.v], hp: [tr1.hp, tr2.hp],
+			sk: [tr1.sk, tr2.sk], sdly: [tr1.sdly, tr2.sdly], dh: [tr1.dh, tr2.dh]
+		};
+		diff.push(basinn);
+		if (basinn < min) {
+			min = basinn;
+			minrun = data;
 		}
-		// run the rest of the way to have data for the chart
-		const pos1 = s1.pos;
-		while (s1.pos < course.distance) {
-			s1.step(1/15);
-			data.t[bi].push(s1.accumulatetime.t);
-			data.p[bi].push(s1.pos);
-			data.v[bi].push(s1.currentSpeed + (s1.modifiers.currentSpeed.acc + s1.modifiers.currentSpeed.err));
-			data.hp[bi].push((s1.hp as GameHpPolicy).hp);
+		if (basinn > max) {
+			max = basinn;
+			maxrun = data;
 		}
-		data.sdly[bi] = s1.startDelay;
-
-		s2.cleanup();
-		s1.cleanup();
-
-		data.dh[1] = skillPos2.get('downhill') || 0; skillPos2.delete('downhill');
-		data.dh[0] = skillPos1.get('downhill') || 0; skillPos1.delete('downhill');
-		data.sk[1] = new Map(skillPos2);  // NOT ai (NB. why not?)
-		skillPos2.clear();
-		data.sk[0] = new Map(skillPos1);  // NOT bi (NB. why not?)
-		skillPos1.clear();
-
-		// if `standard` is faster than `compare` then the former ends up going past the course distance
-		// this is not in itself a problem, but it would overestimate the difference if for example a skill
-		// continues past the end of the course. i feel like there are probably some other situations where it would
-		// be inaccurate also. if this happens we have to swap them around and run it again.
-		if (s2.pos < pos1 || isNaN(pos1)) {
-			[b,a] = [a,b];
-			[bi,ai] = [ai,bi];
-			sign *= -1;
-			--i;  // this one didnt count
-			retry = true;
-		} else {
-			retry = false;
-			nspurt[bi] += +(s1.isLastSpurt && s1.lastSpurtTransition == -1);
-			nspurt[ai] += +(s2.isLastSpurt && s2.lastSpurtTransition == -1);
-			const basinn = sign * (s2.pos - pos1) / 2.5;
-			diff.push(basinn);
-			if (basinn < min) {
-				min = basinn;
-				minrun = data;
+		if (i == sampleCutoff) {
+			diff.sort((a,b) => a - b);
+			estMean = diff.reduce((a,b) => a + b) / diff.length;
+			const mid = Math.floor(diff.length / 2);
+			estMedian = mid > 0 && diff.length % 2 == 0 ? (diff[mid-1] + diff[mid]) / 2 : diff[mid];
+		}
+		if (i >= sampleCutoff) {
+			const meanDiff = Math.abs(basinn - estMean), medianDiff = Math.abs(basinn - estMedian);
+			if (meanDiff < bestMeanDiff) {
+				bestMeanDiff = meanDiff;
+				meanrun = data;
 			}
-			if (basinn > max) {
-				max = basinn;
-				maxrun = data;
-			}
-			if (i == sampleCutoff) {
-				diff.sort((a,b) => a - b);
-				estMean = diff.reduce((a,b) => a + b) / diff.length;
-				const mid = Math.floor(diff.length / 2);
-				estMedian = mid > 0 && diff.length % 2 == 0 ? (diff[mid-1] + diff[mid]) / 2 : diff[mid];
-			}
-			if (i >= sampleCutoff) {
-				const meanDiff = Math.abs(basinn - estMean), medianDiff = Math.abs(basinn - estMedian);
-				if (meanDiff < bestMeanDiff) {
-					bestMeanDiff = meanDiff;
-					meanrun = data;
-				}
-				if (medianDiff < bestMedianDiff) {
-					bestMedianDiff = medianDiff;
-					medianrun = data;
-				}
+			if (medianDiff < bestMedianDiff) {
+				bestMedianDiff = medianDiff;
+				medianrun = data;
 			}
 		}
 	}
+	if (baseline != null && cached == null) baseline.traces = traces;
 	diff.sort((a,b) => a - b);
 	return {results: diff, runData: {nspurt, minrun, maxrun, meanrun, medianrun}};
 }

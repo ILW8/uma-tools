@@ -23,7 +23,8 @@
 // The TS sources build again since uma-skill-tools was vendored and the unpushed engine delta ported
 // (docs/superpowers/specs/2026-08-21-simulator-worker-ts-design.md); the committed bundle stays the
 // default because it's the exact artifact the website ships. Set UMALATOR_WORKER=<path> to run a fresh
-// build of umalator/simulator.worker.ts instead — bit-identical to the shipped bundle as of the port.
+// build of umalator/simulator.worker.ts instead: bit-identical output, and ~1.7x faster in chart mode,
+// which now reuses the baseline uma's races across candidates instead of re-simulating them per candidate.
 
 import * as fs from 'node:fs';
 import * as os from 'node:os';
