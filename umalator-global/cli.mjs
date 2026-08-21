@@ -23,8 +23,9 @@
 // The TS sources build again since uma-skill-tools was vendored and the unpushed engine delta ported
 // (docs/superpowers/specs/2026-08-21-simulator-worker-ts-design.md); the committed bundle stays the
 // default because it's the exact artifact the website ships. Set UMALATOR_WORKER=<path> to run a fresh
-// build of umalator/simulator.worker.ts instead: bit-identical output, and ~1.7x faster in chart mode,
-// which now reuses the baseline uma's races across candidates instead of re-simulating them per candidate.
+// build of umalator/simulator.worker.ts instead: bit-identical output, and ~2.4x faster in chart mode.
+// It reuses the baseline uma's races across the candidates in a chunk instead of re-simulating them per
+// candidate, and carries two hot-loop fixes in the solver the committed bundle predates.
 
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -57,45 +58,60 @@ function makeWorker() {
 
 // --- chart (skill table) ------------------------------------------------------------------------
 
-// one skill per 'chart' message instead of a whole batch: the rounds inside doChart() are per-skill
-// anyway, so this costs nothing and keeps a skill that throws from taking its neighbours with it.
-// Each message is one [job index, skill id] to chart; jobs[i] is the per-course data to chart it against.
-// A null means the queue is empty and the thread can go home.
+// Each message is one [job index, skill ids] chunk to chart; jobs[i] is the per-course data to chart it
+// against. A null means the queue is empty and the thread can go home.
+// The chunk is what makes the worker's baseline cache pay: every candidate in a round replays one cached
+// run of the unchanged uma, so a chunk of k candidates simulates the baseline once instead of k times.
+// One skill per message undid that — with 31 threads and ~30 candidates per course, each thread saw one
+// candidate before the queue moved on to the next course and invalidated its cache.
 function chartSlice({jobs}) {
 	const post = makeWorker();
+	const chart = (ji, ids) => post({msg: 'chart', data: {...jobs[ji], skills: ids}}).results;
 	parentPort.on('message', work => {
 		if (work == null) return void parentPort.close();
-		const [ji, id] = work;
-		let row = null;
+		const [ji, ids] = work;
+		let results;
 		try {
-			const r = post({msg: 'chart', data: {...jobs[ji], skills: [id]}}).results.get(id);
-			row = {ji, id, min: r.min, max: r.max, mean: r.mean, median: r.median, nsamples: r.results.length};
+			results = chart(ji, ids);
 		} catch (_) {
 			// ponytail: stand-in for getActivateableSkills(), which lives in BasinnChart.tsx and isn't reachable
-			// from the worker bundle. Skills it would reject blow up in buildSkillData instead; drop them.
+			// from the worker bundle. Skills it would reject blow up in buildSkillData instead, and take the rest
+			// of the chunk down with them, so re-chart it one at a time to find out which ones.
+			results = new Map();
+			for (const id of ids) { try { chart(ji, [id]).forEach((r, k) => results.set(k, r)); } catch (_) {} }
 		}
-		parentPort.postMessage(row);
+		parentPort.postMessage(ids.map(id => {
+			const r = results.get(id);
+			return r && {ji, id, min: r.min, max: r.max, mean: r.mean, median: r.median, nsamples: r.results.length};
+		}).filter(Boolean));
 	});
 }
 
-// jobs: [{courseId, data}]. Work is (course, skill) pairs rather than one course at a time, because one
+// jobs: [{courseId, data}]. Work is (course, skill chunk) rather than one course at a time, because one
 // course's skills don't fill the pool — 44 candidates over 31 threads is two deep, so half the threads
 // sit idle through the tail, and it gets worse as the candidate list shrinks.
 //
-// Pairs are handed out one at a time on demand rather than dealt up front. Their costs span ~10x — a
-// candidate pruned after 20 samples against one that runs all 200 — so any static split is a dice roll:
-// measured over 12 courses the slowest of 31 pre-dealt slices ran 28.3s against a 22.5s mean, leaving
-// 20% of the round idle. On demand the tail is one pair deep instead.
+// Chunks are handed out on demand rather than dealt up front. Their costs span ~10x — a candidate pruned
+// after 20 samples against one that runs all 200 — so any static split is a dice roll: measured over 12
+// courses the slowest of 31 pre-dealt slices ran 28.3s against a 22.5s mean, leaving 20% of the round idle.
+//
+// Chunk size trades the baseline cache (bigger is better — the baseline is simulated once per chunk and is
+// ~half the cost of charting one candidate) against the tail (smaller is better). Two chunks per thread
+// splits the difference. Measured on 21 medium courses x 30 candidates: one skill per chunk 29.2s, 3 22.7s,
+// 5 20.2s, 10 18.9s, a whole course 18.9s. The rows are identical either way — the rounds inside doChart()
+// and the seeds they draw don't depend on how the candidates are grouped.
 async function runChart(jobs, skills) {
-	const work = jobs.flatMap((_, ji) => skills.map(id => [ji, id]));
-	const nthreads = Math.max(1, Math.min(os.availableParallelism() - 1, work.length));
-	process.stderr.write(`ranking ${skills.length} skills on ${jobs.length} course(s) across ${nthreads} threads\n`);
+	const nthreads = Math.max(1, Math.min(os.availableParallelism() - 1, skills.length * jobs.length));
+	const chunk = Math.max(1, Math.ceil(skills.length * jobs.length / (2 * nthreads)));
+	const work = jobs.flatMap((_, ji) =>
+		Array.from({length: Math.ceil(skills.length / chunk)}, (_, k) => [ji, skills.slice(k * chunk, (k + 1) * chunk)]));
+	process.stderr.write(`ranking ${skills.length} skills on ${jobs.length} course(s) across ${nthreads} threads (${work.length} chunks of ${chunk})\n`);
 	let next = 0, done = 0;
 	const data = jobs.map(j => j.data);
 	const rows = new Array(work.length);  // by work index, so the output doesn't depend on who finished first
 	await Promise.all(Array.from({length: nthreads}, () => new Promise((resolve, reject) => {
 		const w = new Worker(fileURLToPath(import.meta.url), {workerData: {chart: {jobs: data}}});
-		let mine = -1;  // each thread has exactly one pair outstanding
+		let mine = -1;  // each thread has exactly one chunk outstanding
 		const feed = () => next < work.length ? w.postMessage(work[mine = next++]) : (w.postMessage(null), resolve());
 		w.on('message', row => {
 			if (row) rows[mine] = row;
@@ -106,7 +122,7 @@ async function runChart(jobs, skills) {
 		feed();
 	})));
 	if (process.stderr.isTTY) process.stderr.write('\r\x1b[K');
-	return rows.filter(Boolean).map(({ji, ...r}) => ({...r, courseId: jobs[ji].courseId}));
+	return rows.filter(Boolean).flat().map(({ji, ...r}) => ({...r, courseId: jobs[ji].courseId}));
 }
 
 // skill lists, from app.tsx / SkillList.tsx / HorseDef.tsx

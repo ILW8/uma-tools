@@ -29,7 +29,9 @@ UMALATOR_WORKER=<scratch>/worker.js node .claude/skills/umalator-team-trials/opt
 
 `<scratch>` is any temp path (the session scratchpad is fine). The env var propagates through
 `optimize.mjs` into `cli.mjs` and its worker threads; if it's unset, everything falls back to the
-committed `simulator.worker.js`.
+committed `simulator.worker.js`. Build it even when you have no engine edits to reflect: the rebuilt
+worker is **~2.4x faster in chart mode**, which is most of a run (34.4s vs 14.6s for one chart round over
+21 medium courses). The committed bundle predates the baseline-race cache and two hot-loop fixes.
 
 Run it from the repo root or `umalator-global/`; otherwise pass `--dir path/to/umalator-global`.
 `skill_tree.json` is UmaExtractor's, and must contain the `uma` block (`--skills` alone won't do).

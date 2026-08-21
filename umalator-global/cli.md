@@ -5,8 +5,10 @@ ships — into a `vm` context with `self`/`postMessage` shimmed, so there is no 
 No dependencies; run on Node 22 (it wants `DecompressionStream` and `os.availableParallelism`).
 
 `UMALATOR_WORKER=<path>` runs a fresh build of `umalator/simulator.worker.ts` (see `build-worker.mjs`)
-instead. Same numbers, but ~1.7x faster in chart mode: it reuses the baseline uma's races across
-candidates, which the committed bundle predates.
+instead. Same numbers, but **~2.4x faster in chart mode** — it reuses the baseline uma's races across
+candidates and carries two hot-loop fixes in the solver, all of which the committed bundle predates.
+Measured over 21 courses x 30 candidates on 31 threads: 34.4s committed, 14.6s rebuilt. Build it for
+anything that charts more than once.
 
 ```
 node cli.mjs <share url | #hash | state.json> [--chart] [--nsamples N] [--top N] [--skills F] [--json]
@@ -73,12 +75,23 @@ skills that file says are **buyable right now**, and it prices them with that fi
 
 Chart several courses in one run by passing them all to `--course` — one table each, or with `--json`
 one flat array with a `courseId` on every row. Prefer this over a run per course: the pool is fed
-(course, skill) pairs, so it stays full instead of draining in each course's tail, and the workers spin
-up and compile the bundle once. Measured over 12 courses it is a bit over 2x.
+(course, skill chunk) work items, so it stays full instead of draining in each course's tail, and the
+workers spin up and compile the bundle once. Measured over 12 courses it is a bit over 2x.
 
-Pairs are handed to threads one at a time as they finish, not dealt out up front. Their costs span ~10x
+Chunks are handed to threads one at a time as they finish, not dealt out up front. Their costs span ~10x
 (see the escalation note below), so a static split leaves the pool waiting on whichever thread drew the
 slow ones — measured at 20% of a round.
+
+A chunk is several candidates for one course, not one candidate, because a rebuilt worker
+(`UMALATOR_WORKER`) simulates the round's baseline uma once per chunk and lets every candidate in it
+replay that. One candidate per work item threw all of that away: with 31 threads and ~30 candidates per
+course, each thread got one candidate before the queue moved to the next course and invalidated its
+cache. The size is `ceil(nskills * ncourses / 2 * nthreads)` — enough candidates to amortise the
+baseline, enough chunks to keep the tail short. Both halves matter and the balance moves with the course
+count, so re-measure before changing it; at 31 threads and 30 candidates, over 21 courses one candidate
+per chunk took 29.2s against 18.9s for 10, and over 12 courses 6 was best at 10.9s while a whole course
+per chunk fell back to 15.7s. The rows are identical at every size: the escalation rounds inside the
+worker and the seeds they draw don't depend on how the candidates are grouped.
 
 `--race` vocabulary: `firm good soft heavy` / `sunny cloudy rainy snowy` /
 `spring summer autumn winter sakura` / `morning midday evening night` / `g1 g2 g3 op`.
