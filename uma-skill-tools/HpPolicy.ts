@@ -7,7 +7,7 @@ import { PRNG } from './Random';
 export interface HpPolicy {
 	init(horse: HorseParameters): void
 	tick(state: RaceState, dt: number): void
-	hasRemainingHp(): boolean
+	remainingHp(): number
 	hpRatioRemaining(): number  // separate methods as the former can be much cheaper to check
 	recover(modifier: number): void
 	getLastSpurtPair(state: RaceState, maxSpeed: number, baseTargetSpeed2: number): [number, number]
@@ -16,7 +16,7 @@ export interface HpPolicy {
 export const NoopHpPolicy: HpPolicy = {
 	init(_: HorseParameters) {},
 	tick(_0: RaceState, _1: number) {},
-	hasRemainingHp() { return true; },
+	remainingHp() { return 1; },
 	hpRatioRemaining() { return 1.0; },
 	recover(_: number) {},
 	getLastSpurtPair(_0: RaceState, maxSpeed: number, _1: number) { return [-1, maxSpeed] as [number, number]; }
@@ -37,6 +37,7 @@ export class GameHpPolicy {
 	groundModifier: number
 	gutsModifier: number
 	subparAcceptChance: number
+	competeTopModifier: [number, number]
 	rng: PRNG
 
 	constructor(course: CourseData, ground: GroundCondition, rng: PRNG) {
@@ -54,9 +55,10 @@ export class GameHpPolicy {
 		this.hp = this.maxHp;
 		this.gutsModifier = 1.0 + 200.0 / Math.sqrt(600.0 * horse.guts);
 		this.subparAcceptChance = Math.round((15.0 + 0.05 * horse.wisdom) * 1000);
+		this.competeTopModifier = horse.strategy == 5 ? [3.5, 7.7] : [1.4, 3.6];
 	}
 
-	getStatusModifier(state: {isPaceDown: boolean, isDownhillMode: boolean, isKakari: boolean}) {
+	getStatusModifier(state: {isPaceDown: boolean, isDownhillMode: boolean, isItidoriarasoi: boolean, isKakari: boolean}) {
 		let modifier = 1.0;
 		if (state.isPaceDown) {
 			modifier *= 0.6;
@@ -64,13 +66,16 @@ export class GameHpPolicy {
 		if (state.isDownhillMode) {
 			modifier *= 0.4;
 		}
-		if (state.isKakari) {
+		if (state.isItidoriarasoi) {
+			modifier *= this.competeTopModifier[+state.isKakari];
+		}
+		if (state.isKakari && !state.isItidoriarasoi) {
 			modifier *= 1.6;
 		}
 		return modifier;
 	}
 
-	hpPerSecond(state: {phase: Phase, isPaceDown: boolean, isDownhillMode: boolean, isKakari: boolean}, velocity: number) {
+	hpPerSecond(state: {phase: Phase, isPaceDown: boolean, isDownhillMode: boolean, isItidoriarasoi: boolean, isKakari: boolean}, velocity: number) {
 		const gutsModifier = state.phase >= 2 ? this.gutsModifier : 1.0;
 		return 20.0 * Math.pow(velocity - this.baseSpeed + 12.0, 2) / 144.0 *
 			this.getStatusModifier(state) * this.groundModifier * gutsModifier;
@@ -82,8 +87,8 @@ export class GameHpPolicy {
 		this.hp -= this.hpPerSecond(state, state.currentSpeed) * dt;
 	}
 
-	hasRemainingHp() {
-		return this.hp > 0.0;
+	remainingHp() {
+		return this.hp;
 	}
 
 	hpRatioRemaining() {
@@ -97,7 +102,7 @@ export class GameHpPolicy {
 	getLastSpurtPair(state: RaceState, maxSpeed: number, baseTargetSpeed2: number) {
 		const maxDist = this.distance - CourseHelpers.phaseStart(this.distance, 2);
 		const s = (maxDist - 60) / maxSpeed;
-		const lastleg = {phase: 2 as Phase, isPaceDown: false, isDownhillMode: false, isKakari: false};
+		const lastleg = {phase: 2 as Phase, isPaceDown: false, isDownhillMode: false, isItidoriarasoi: false, isKakari: false};
 		if (this.hp >= this.hpPerSecond(lastleg, maxSpeed) * s) {
 			return [-1, maxSpeed] as [number, number];
 		}

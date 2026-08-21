@@ -109,6 +109,9 @@ export interface RaceState {
 	readonly activateCount: readonly number[]
 	readonly activateCountHeal: number
 	readonly activateCountLastFrame: number
+	readonly activateCountHealLastFrame: number
+	readonly activateCountLaterHalf: number
+	readonly isItidoriarasoi: boolean
 	readonly currentSpeed: number
 	readonly isLastSpurt: boolean
 	readonly lastSpurtSpeed: number
@@ -156,10 +159,35 @@ export const enum SkillType {
 
 export const enum SkillRarity { White = 1, Gold, Unique, Evolution = 6 }
 
+export const enum SkillTarget {
+	Self = 1,
+	All = 2,
+	InFov = 4,
+	AheadOfPosition = 7,
+	AheadOfSelf = 9,
+	BehindSelf = 10,
+	AllAllies = 11,
+	EnemyStrategy = 18,
+	KakariAhead = 19,
+	KakariBehind = 20,
+	KakariStrategy = 21,
+	UmaId = 22,
+	UsedRecovery = 23
+}
+
+export function isTargetedEffect(self: Perspective, target: SkillTarget) {
+	return target == SkillTarget.All || self == Perspective.Any || ((self == Perspective.Self) == (target == SkillTarget.Self));
+}
+
 export interface SkillEffect {
 	type: SkillType
+	target: SkillTarget
 	baseDuration: number
+	durationScaling: number
+	durationScalingFunc?: (s: RaceSolver, baseDuration: number, rng: PRNG) => number
 	modifier: number
+	modifierScaling: number
+	modifierScalingFunc?: (s: RaceSolver, baseModifier: number, rng: PRNG) => number
 }
 
 export interface PendingSkill {
@@ -169,6 +197,7 @@ export interface PendingSkill {
 	trigger: Region
 	extraCondition: DynamicCondition
 	effects: SkillEffect[]
+	tags: number[]
 }
 
 interface ActiveSkill {
@@ -196,7 +225,7 @@ export class RaceSolver {
 	course: CourseData
 	hp: HpPolicy
 	rng: PRNG
-	gorosiRng: PRNG
+	skillRngs: Map<string, PRNG>
 	paceEffectRng: PRNG
 	hillRng: PRNG[]
 	timers: Timer[]
@@ -223,6 +252,11 @@ export class RaceSolver {
 	activateCount: number[]
 	activateCountHeal: number
 	activateCountLastFrame: number
+	activateCountThisFrame: number
+	activateCountHealLastFrame: number
+	activateCountHealThisFrame: number
+	activateCountTagGroup6: number
+	activateCountLaterHalf: number
 	onSkillActivate: (s: RaceSolver, skillId: string, perspective: Perspective) => void
 	onSkillDeactivate: (s: RaceSolver, skillId: string, perspective: Perspective) => void
 	sectionLength: number
@@ -232,6 +266,7 @@ export class RaceSolver {
 	isKakari: boolean
 	temptationCount: number
 	pacer: RaceSolver | null
+	isItidoriarasoi: boolean
 	isPaceDown: boolean
 	posKeepMinThreshold: number
 	posKeepMaxThreshold: number
@@ -270,7 +305,13 @@ export class RaceSolver {
 		this.pendingSkills = params.skills.slice();  // copy since we remove from it
 		this.pendingRemoval = new Set();
 		this.usedSkills = new Set();
-		this.gorosiRng = new Rule30CARng(this.rng.int32());
+		// derive a per-skill rng from one draw of the main rng so that adding or removing a skill doesn't shift every
+		// other skill's rolls (duration/modifier scaling, gold activation order)
+		const skillSeed = this.rng.pair();
+		this.skillRngs = new Map(params.skills.map(s => {
+			const h = s.skillId.split('').reduce((a,c) => a * 33 ^ c.charCodeAt(0), 5381);
+			return [s.skillId, new Rule30CARng(skillSeed[0] ^ h, skillSeed[1] ^ h) as PRNG];
+		}));
 		this.paceEffectRng = new Rule30CARng(this.rng.int32());
 		this.timers = [];
 		this.accumulatetime = this.getNewTimer();
@@ -290,11 +331,17 @@ export class RaceSolver {
 		this.activeCurrentSpeedSkills = [];
 		this.activeAccelSkills = [];
 		this.activateCount = [0,0,0];
-		this.activateCountHeal = 0;
 		this.activateCountLastFrame = 0;
+		this.activateCountThisFrame = 0;
+		this.activateCountHeal = 0;
+		this.activateCountHealLastFrame = 0;
+		this.activateCountHealThisFrame = 0;
+		this.activateCountTagGroup6 = 0;
+		this.activateCountLaterHalf = 0;
 		this.onSkillActivate = params.onSkillActivate || noop;
 		this.onSkillDeactivate = params.onSkillDeactivate || noop;
 		this.sectionLength = this.course.distance / 24.0;
+		this.isItidoriarasoi = false;
 		this.isPaceDown = false;
 		this.posKeepMinThreshold = PositionKeep.minThreshold(this.horse.strategy, this.course.distance);
 		this.posKeepMaxThreshold = PositionKeep.maxThreshold(this.horse.strategy, this.course.distance);
@@ -530,7 +577,7 @@ export class RaceSolver {
 	}
 
 	updateTargetSpeed() {
-		if (!this.hp.hasRemainingHp()) {
+		if (this.hp.remainingHp() <= 0) {
 			this.targetSpeed = this.minSpeed;
 		} else if (this.isLastSpurt) {
 			this.targetSpeed = this.lastSpurtSpeed;
@@ -541,7 +588,7 @@ export class RaceSolver {
 		this.targetSpeed += this.modifiers.targetSpeed.acc + this.modifiers.targetSpeed.err;
 
 		if (this.isDownhillMode) {
-			this.targetSpeed += 0.3 + this.slopePer / 100000.0;
+			this.targetSpeed += 0.3 + -this.slopePer / 100000.0;
 		} else if (this.hillIdx != -1 && this.slopePer > 0) {
 			// recalculating this every frame is actually measurably faster than calculating the penalty for each slope ahead of time, somehow
 			this.targetSpeed -= this.slopePer / 10000.0 * 200.0 / this.horse.power;
@@ -550,7 +597,7 @@ export class RaceSolver {
 	}
 
 	applyForces() {
-		if (!this.hp.hasRemainingHp()) {
+		if (this.hp.remainingHp() <= 0) {
 			this.accel = -1.2;
 			return;
 		}
@@ -608,9 +655,10 @@ export class RaceSolver {
 	processSkillActivations() {
 		for (let i = this.activeTargetSpeedSkills.length; --i >= 0;) {
 			const s = this.activeTargetSpeedSkills[i];
-			if (s.durationTimer.t >= 0) {
+			if (s.durationTimer.t >= 0 || (s.skillId == 'itidoriarasoi' && this.pos >= 8 * this.sectionLength)) {
 				this.activeTargetSpeedSkills.splice(i,1);
 				this.modifiers.targetSpeed.add(-s.modifier);
+				if (s.skillId == 'itidoriarasoi') this.isItidoriarasoi = false;
 				this.onSkillDeactivate(this, s.skillId, s.perspective);
 			}
 		}
@@ -633,108 +681,213 @@ export class RaceSolver {
 				this.onSkillDeactivate(this, s.skillId, s.perspective);
 			}
 		}
-		let activateCountThisFrame = 0;
+		this.activateCountThisFrame = 0;
+		this.activateCountHealThisFrame = 0;
 		for (let i = this.pendingSkills.length; --i >= 0;) {
 			const s = this.pendingSkills[i];
-			if (this.pos >= s.trigger.end || this.pendingRemoval.has(s.skillId)) {  // NB. `Region`s are half-open [start,end) intervals. If pos == end we are out of the trigger.
+			if (this.pos >= s.trigger.end || this.pendingRemoval.has(s.skillId + s.perspective)) {  // NB. `Region`s are half-open [start,end) intervals. If pos == end we are out of the trigger.
 				// skill failed to activate
 				// FIXME removing from pendingSkills here means that 564 will never pick a skill that already passed its chance to activate
 				// (and failed) before 564 procced, which is wrong
 				this.pendingSkills.splice(i,1);
-				this.pendingRemoval.delete(s.skillId);
+				this.pendingRemoval.delete(s.skillId + s.perspective);
 			} else if (this.pos >= s.trigger.start && s.extraCondition(this)) {
 				this.activateSkill(s);
 				this.pendingSkills.splice(i,1);
-				// TODO i don't exactly like hardcoding these; perhaps need some isRealSkill property on `PendingSkill` or move these mechanics out
-				// of RaceSolverBuilder and into RaceSolver
-				if (s.skillId != 'asitame' && s.skillId != 'staminasyoubu') ++activateCountThisFrame;
 			}
 		}
-		this.activateCountLastFrame = activateCountThisFrame;
+		this.activateCountLastFrame = this.activateCountThisFrame;
+		this.activateCountHealLastFrame = this.activateCountHealThisFrame;
 	}
 
 	activateSkill(s: PendingSkill) {
+		let anyEffectApplied = false;
 		// sort so that the ExtendEvolvedDuration effect always activates after other effects, since it shouldn't extend the duration of other
 		// effects on the same skill
 		s.effects.sort((a,b) => +(a.type == 42) - +(b.type == 42)).forEach(ef => {
-			const scaledDuration = ef.baseDuration * (this.course.distance / 1000) *
+			if (!isTargetedEffect(s.perspective, ef.target) && ef.type != SkillType.ActivateRandomGold) return;
+			const scaledDuration = this.getScaledDuration(s.skillId, ef) * (this.course.distance / 1000) *
 				(s.rarity == SkillRarity.Evolution ? this.modifiers.specialSkillDurationScaling : 1);  // TODO should probably be awakened skills
 				                                                                                       // and not just pinks
+			const modifier = this.getScaledModifier(s.skillId, ef);
 			switch (ef.type) {
 			case SkillType.Noop:
 				break;
 			case SkillType.SpeedUp:
-				this.horse.speed = Math.max(this.horse.speed + ef.modifier, 1);
+				this.horse.speed = Math.max(this.horse.speed + modifier, 1);
 				break;
 			case SkillType.StaminaUp:
-				this.horse.stamina = Math.max(this.horse.stamina + ef.modifier, 1);
-				this.horse.rawStamina = Math.max(this.horse.rawStamina + ef.modifier, 1);
+				this.horse.stamina = Math.max(this.horse.stamina + modifier, 1);
+				this.horse.rawStamina = Math.max(this.horse.rawStamina + modifier, 1);
 				break;
 			case SkillType.PowerUp:
-				this.horse.power = Math.max(this.horse.power + ef.modifier, 1);
+				this.horse.power = Math.max(this.horse.power + modifier, 1);
+				this.horse.rawPower = Math.max(this.horse.rawPower + modifier, 1);
 				break;
 			case SkillType.GutsUp:
-				this.horse.guts = Math.max(this.horse.guts + ef.modifier, 1);
+				this.horse.guts = Math.max(this.horse.guts + modifier, 1);
 				break;
 			case SkillType.WisdomUp:
-				this.horse.wisdom = Math.max(this.horse.wisdom + ef.modifier, 1);
+				this.horse.wisdom = Math.max(this.horse.wisdom + modifier, 1);
 				break;
 			case SkillType.MultiplyStartDelay:
-				this.startDelay *= ef.modifier;
+				this.startDelay *= modifier;
 				break;
 			case SkillType.ExtendKakari:
-				if (this.isKakari) this.kakariTimer.t -= ef.modifier;
+				if (this.isKakari) this.kakariTimer.t -= modifier;
 				break;
 			case SkillType.SetStartDelay:
-				this.startDelay = ef.modifier;
+				this.startDelay = modifier;
 				break;
 			case SkillType.TargetSpeed:
-				this.modifiers.targetSpeed.add(ef.modifier);
-				this.activeTargetSpeedSkills.push({skillId: s.skillId, perspective: s.perspective, durationTimer: this.getNewTimer(-scaledDuration), modifier: ef.modifier});
+				this.modifiers.targetSpeed.add(modifier);
+				this.activeTargetSpeedSkills.push({skillId: s.skillId, perspective: s.perspective, durationTimer: this.getNewTimer(-scaledDuration), modifier});
 				break;
 			case SkillType.ModifyKakariChance:
-				this.modifiers.kakariChance += ef.modifier / 100.0;
+				this.modifiers.kakariChance += modifier / 100.0;
 				break;
 			case SkillType.Accel:
-				this.modifiers.accel.add(ef.modifier);
-				this.activeAccelSkills.push({skillId: s.skillId, perspective: s.perspective, durationTimer: this.getNewTimer(-scaledDuration), modifier: ef.modifier});
+				this.modifiers.accel.add(modifier);
+				this.activeAccelSkills.push({skillId: s.skillId, perspective: s.perspective, durationTimer: this.getNewTimer(-scaledDuration), modifier});
 				break;
 			case SkillType.CurrentSpeed:
 			case SkillType.CurrentSpeedWithNaturalDeceleration:
-				this.modifiers.currentSpeed.add(ef.modifier);
+				this.modifiers.currentSpeed.add(modifier);
 				this.activeCurrentSpeedSkills.push({
-					skillId: s.skillId, perspective: s.perspective, durationTimer: this.getNewTimer(-scaledDuration), modifier: ef.modifier,
+					skillId: s.skillId, perspective: s.perspective, durationTimer: this.getNewTimer(-scaledDuration), modifier,
 					naturalDeceleration: ef.type == SkillType.CurrentSpeedWithNaturalDeceleration
 				});
 				break;
 			case SkillType.Recovery:
-				if (s.perspective == Perspective.Self) ++this.activateCountHeal;
-				this.hp.recover(ef.modifier);
+				if (s.perspective == Perspective.Self && modifier > 0) {
+					++this.activateCountHeal;
+					++this.activateCountHealThisFrame;
+				}
+				this.hp.recover(modifier);
 				if (this.phase >= 2 && !this.isLastSpurt) {
 					this.lastSpurtTransition = -1;  // reset
 					this.updateLastSpurtState();
 				}
 				break;
 			case SkillType.ActivateRandomGold:
-				this.doActivateRandomGold(ef.modifier);
+				this.doActivateRandomGold(s.skillId, modifier, s.perspective);
 				break;
 			case SkillType.ExtendEvolvedDuration:
-				this.modifiers.specialSkillDurationScaling = ef.modifier;
+				this.modifiers.specialSkillDurationScaling = modifier;
 				break;
 			}
+			anyEffectApplied = true;
 		});
-		if (s.perspective == Perspective.Self) ++this.activateCount[this.phase];
-		this.usedSkills.add(s.skillId);
-		this.onSkillActivate(this, s.skillId, s.perspective);
+		// pseudo-skills (itidoriarasoi, asitame, etc) have no tags and don't count as skill activations
+		if (s.perspective == Perspective.Self && s.tags.length > 0) {
+			++this.activateCount[this.phase];
+			++this.activateCountThisFrame;
+			if (s.tags.some(t => t >= 600 && t < 700)) ++this.activateCountTagGroup6;
+			if (this.pos >= 0.5 * this.course.distance) ++this.activateCountLaterHalf;
+			this.usedSkills.add(s.skillId);
+		}
+		if (s.skillId == 'itidoriarasoi') this.isItidoriarasoi = true;
+		if (anyEffectApplied) this.onSkillActivate(this, s.skillId, s.perspective);
 	}
 
-	doActivateRandomGold(ngolds: number) {
+	getScaledDuration(skillId: string, ef: SkillEffect) {
+		const base = ef.baseDuration;
+		switch (ef.durationScaling) {
+		case 1:
+			return base;
+		case 2:
+			return base * (0.8 + this.skillRngs.get(skillId).uniform(51) / 62.5);
+		case 3: {
+			const hp = this.hp.remainingHp();
+			let coef;
+			if (hp < 2000) coef = 1;
+			else if (hp < 2400) coef = 1.5;
+			else if (hp < 2600) coef = 2;
+			else if (hp < 2800) coef = 2.2;
+			else if (hp < 3000) coef = 2.5;
+			else if (hp < 3200) coef = 3;
+			else if (hp < 3500) coef = 3.5;
+			else coef = 4;
+			return base * coef;
+		}
+		case 4:
+			return base + this.skillRngs.get(skillId).uniform(4);
+		case 5:
+			return base * Math.ceil((1 + this.skillRngs.get(skillId).uniform(8)) / 2);
+		case 7: {
+			const hp = this.hp.remainingHp();
+			let coef;
+			if (hp < 1500) coef = 1;
+			else if (hp < 1800) coef = 1.5;
+			else if (hp < 2000) coef = 2;
+			else if (hp < 2100) coef = 2.5;
+			else coef = 3;
+			return base * coef;
+		}
+		case 9999:
+			return ef.durationScalingFunc(this, base, this.skillRngs.get(skillId));
+		default:
+			assert(false, 'unimplemented duration scaling type ' + ef.durationScaling);
+			return base;
+		}
+	}
+
+	getScaledModifier(skillId: string, ef: SkillEffect) {
+		const base = ef.modifier;
+		switch (ef.modifierScaling) {
+		case 1:
+		case 11:
+		case 13:
+		case 20:
+		case 21:
+		case 22:
+		case 23:
+		case 24:
+		case 34:
+			return base;
+		case 2:
+		case 3:
+		case 4:
+		case 5:
+		case 6:
+		case 7:
+		case 10:
+		case 12:
+		case 26:
+		case 28:
+		case 32:
+			return base * 1.2;
+		case 8:
+		case 9: {
+			const roll = this.skillRngs.get(skillId).uniform(10);
+			return base * (roll < 6 ? 0 : roll < 9 ? 0.02 : 0.04);
+		}
+		case 14: {
+			const n = this.activateCountTagGroup6;
+			return base * (n < 3 ? 0 : n < 5 ? 1 : n < 6 ? 2 : 3);
+		}
+		case 19:
+			return base + 0.1 * this.skillRngs.get(skillId).uniform(2);
+		case 25:
+			return base * [1, 1.4, 1.8][this.skillRngs.get(skillId).uniform(3)];
+		case 9999:
+			return ef.modifierScalingFunc(this, base, this.skillRngs.get(skillId));
+		default:
+			assert(false, 'unimplemented modifier scaling type ' + ef.modifierScaling);
+			return base;
+		}
+	}
+
+	doActivateRandomGold(activatingSkillId: string, ngolds: number, perspective: Perspective) {
 		const goldIndices = this.pendingSkills.reduce((acc, skill, i) => {
-			if ((skill.rarity == SkillRarity.Gold || skill.rarity == SkillRarity.Evolution) && skill.effects.every(ef => ef.type > SkillType.WisdomUp)) acc.push(i);
+			if (skill.perspective == perspective && (skill.rarity == SkillRarity.Gold || skill.rarity == SkillRarity.Evolution)
+			 && skill.effects.every(ef => ef.type > SkillType.WisdomUp)) acc.push(i);
 			return acc;
 		}, []);
+		// sort by skill id so the shuffle doesn't depend on pendingSkills order (which changes as skills activate)
+		goldIndices.sort((a,b) => this.pendingSkills[a].skillId.localeCompare(this.pendingSkills[b].skillId));
 		for (let i = goldIndices.length; --i >= 0;) {
-			const j = this.gorosiRng.uniform(i + 1);
+			const j = this.skillRngs.get(activatingSkillId).uniform(i + 1);
 			[goldIndices[i], goldIndices[j]] = [goldIndices[j], goldIndices[i]];
 		}
 		for (let i = 0; i < Math.min(ngolds, goldIndices.length); ++i) {
@@ -746,7 +899,7 @@ export class RaceSolver {
 			// is error-prone and undesirable since it means the same PendingSkill instance can't be used with multiple RaceSolvers.
 			// instead, flag the skill later to be removed in processSkillActivations (either later in the loop that called us, or
 			// the next time processSkillActivations is called).
-			this.pendingRemoval.add(s.skillId);
+			this.pendingRemoval.add(s.skillId + s.perspective);
 		}
 	}
 

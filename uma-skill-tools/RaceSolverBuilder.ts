@@ -1,11 +1,11 @@
-import { HorseParameters, Strategy, Aptitude } from './HorseTypes';
+import { HorseParameters, Strategy, Aptitude, StrategyHelpers } from './HorseTypes';
 import { CourseData, CourseHelpers, DistanceType } from './CourseData';
 import { Region, RegionList } from './Region';
 import { PRNG, Rule30CARng } from './Random';
 import { Conditions, random, immediate, noopRandom } from './ActivationConditions';
-import { ActivationSamplePolicy, ImmediatePolicy } from './ActivationSamplePolicy';
+import { ActivationSamplePolicy, ImmediatePolicy, RandomPolicy } from './ActivationSamplePolicy';
 import { getParser } from './ConditionParser';
-import { RaceSolver, RaceState, PendingSkill, DynamicCondition, SkillType, SkillRarity, SkillEffect, Perspective } from './RaceSolver';
+import { RaceSolver, RaceState, PendingSkill, DynamicCondition, SkillType, SkillRarity, SkillTarget, SkillEffect, Perspective } from './RaceSolver';
 import { Mood, GroundCondition, Weather, Season, Time, Grade, RaceParameters } from './RaceParameters';
 import { HpPolicy, GameHpPolicy, NoopHpPolicy } from './HpPolicy';
 
@@ -23,6 +23,8 @@ export interface HorseDesc {
 	distanceAptitude: string | Aptitude
 	surfaceAptitude: string | Aptitude
 	strategyAptitude: string | Aptitude
+	mood: Mood
+	popularity: number
 }
 
 const GroundSpeedModifier = Object.freeze([
@@ -177,8 +179,8 @@ function adjustOvercap(stat: number) {
 	return stat > 1200 ? 1200 + Math.floor((stat - 1200) / 2) : stat;
 }
 
-export function buildBaseStats(horseDesc: HorseDesc, mood: Mood) {
-	const motivCoef = 1 + 0.02 * mood;
+export function buildBaseStats(horseDesc: HorseDesc) {
+	const motivCoef = 1 + 0.02 * horseDesc.mood;
 
 	return Object.freeze({
 		speed: adjustOvercap(horseDesc.speed) * motivCoef,
@@ -190,7 +192,10 @@ export function buildBaseStats(horseDesc: HorseDesc, mood: Mood) {
 		distanceAptitude: parseAptitude(horseDesc.distanceAptitude, 'distance'),
 		surfaceAptitude: parseAptitude(horseDesc.surfaceAptitude, 'surface'),
 		strategyAptitude: parseAptitude(horseDesc.strategyAptitude, 'strategy'),
-		rawStamina: horseDesc.stamina * motivCoef
+		rawStamina: horseDesc.stamina * motivCoef,
+		rawPower: horseDesc.power * motivCoef,
+		mood: horseDesc.mood,
+		popularity: horseDesc.popularity
 	});
 }
 
@@ -207,27 +212,14 @@ export function buildAdjustedStats(baseStats: HorseParameters, course: CourseDat
 		distanceAptitude: baseStats.distanceAptitude,
 		surfaceAptitude: baseStats.surfaceAptitude,
 		strategyAptitude: baseStats.strategyAptitude,
-		rawStamina: baseStats.rawStamina
+		rawStamina: baseStats.rawStamina,
+		rawPower: Math.max(baseStats.rawPower + GroundPowerModifier[course.surface][ground], 1),
+		mood: baseStats.mood,
+		popularity: baseStats.popularity
 	});
 }
 
-export const enum SkillTarget {
-	Self = 1,
-	All = 2,
-	InFov = 4,
-	AheadOfPosition = 7,
-	AheadOfSelf = 9,
-	BehindSelf = 10,
-	AllAllies = 11,
-	EnemyStrategy = 18,
-	KakariAhead = 19,
-	KakariBehind = 20,
-	KakariStrategy = 21,
-	UmaId = 22,
-	UsedRecovery = 23
-}
-
-export { Perspective } from './RaceSolver';
+export { Perspective, SkillTarget } from './RaceSolver';
 
 export interface SkillData {
 	skillId: string
@@ -238,25 +230,44 @@ export interface SkillData {
 	regions: RegionList
 	extraCondition: DynamicCondition
 	effects: SkillEffect[]
+	tags: number[]
 }
 
-function isTarget(self: Perspective, targetType: SkillTarget) {
-	return targetType == SkillTarget.All || self == Perspective.Any || ((self == Perspective.Self) == (targetType == SkillTarget.Self));
+const uniqueScalingCoef = Object.freeze([1, 1.01, 1.02, 1.03, 1.04, 1.05, 1.06, 1.07, 1.08, 1.1]);
+const LevelScalingCoef = Object.freeze({
+	[SkillType.SpeedUp]: uniqueScalingCoef,
+	[SkillType.StaminaUp]: uniqueScalingCoef,
+	[SkillType.PowerUp]: uniqueScalingCoef,
+	[SkillType.GutsUp]: uniqueScalingCoef,
+	[SkillType.WisdomUp]: uniqueScalingCoef,
+	[SkillType.TargetSpeed]: Object.freeze([1, 1.01, 1.04, 1.07, 1.1, 1.13, 1.16, 1.19, 1.22, 1.25]),
+	[SkillType.Accel]: Object.freeze([1, 1.02, 1.04, 1.06, 1.08, 1.1, 1.125, 1.15, 1.175, 1.2])
+});
+
+export function levelScalingCoef(type: SkillType, level: number) {
+	return LevelScalingCoef.hasOwnProperty(type) ? LevelScalingCoef[type][level - 1] : 1 + (level - 1) * 0.02;
 }
 
-function buildSkillEffects(skill, perspective: Perspective) {
+// target filtering happens at runtime in RaceSolver now (effects carry their target), so perspective is unused here,
+// but keep the parameter to preserve the call shape
+function buildSkillEffects(skill, perspective: Perspective, level: number) {
 	return skill.effects.map(ef => ({
-		type: SkillType.hasOwnProperty(ef.type) && isTarget(perspective, ef.target) ? ef.type : SkillType.Noop,
+		type: SkillType.hasOwnProperty(ef.type) ? ef.type : SkillType.Noop,
+		target: ef.target,
 		baseDuration: skill.baseDuration / 10000,
-		modifier: ef.modifier / 10000
+		durationScaling: skill.durationScaling,
+		modifier: ef.modifier / 10000 * levelScalingCoef(ef.type, level),
+		modifierScaling: ef.scaling
 	}));
 }
 
-export function buildSkillData(horse: HorseParameters, raceParams: PartialRaceParameters, course: CourseData, wholeCourse: RegionList, parser: {parse: any, tokenize: any}, skillId: string, perspective: Perspective, ignoreNullEffects: boolean = false) {
+export function buildSkillData(selfHorse: HorseParameters, otherHorse: HorseParameters, raceParams: PartialRaceParameters, course: CourseData, wholeCourse: RegionList, parser: {parse: any, tokenize: any}, skillId: string, perspective: Perspective, level: number, ignoreNullEffects: boolean = false) {
 	if (!(skillId in skills)) {
 		throw new Error('bad skill ID ' + skillId);
 	}
-	const extra = Object.assign({skillId}, raceParams);
+	// conditions on a debuff are evaluated against the uma being debuffed
+	const horse = perspective == Perspective.Other ? otherHorse : selfHorse;
+	const extra = Object.assign({skillId, otherHorse: perspective == Perspective.Other ? selfHorse : otherHorse}, raceParams);
 	const alternatives = skills[skillId].alternatives;
 	const triggers = [];
 	for (let i = 0; i < alternatives.length; ++i) {
@@ -290,7 +301,7 @@ export function buildSkillData(horse: HorseParameters, raceParams: PartialRacePa
 			// !!! FIXME this is actually bugged for NY Ace unique since she'll get both effects if she uses oonige.
 			continue;
 		}
-		const effects = buildSkillEffects(skill, perspective);
+		const effects = buildSkillEffects(skill, perspective, level);
 		if (effects.length > 0 || ignoreNullEffects) {
 			const rarity = skills[skillId].rarity;
 			triggers.push({
@@ -302,7 +313,8 @@ export function buildSkillData(horse: HorseParameters, raceParams: PartialRacePa
 				samplePolicy: op.samplePolicy,
 				regions: regions,
 				extraCondition: extraCondition,
-				effects: effects
+				effects: effects,
+				tags: skills[skillId].tags
 			});
 		}
 	}
@@ -311,7 +323,7 @@ export function buildSkillData(horse: HorseParameters, raceParams: PartialRacePa
 	// however, for purposes of summer goldship unique (Adventure of 564), we still have to add something, since
 	// that could still cause them to activate. so just add the first alternative at a location after the course
 	// is over with a constantly false dynamic condition so that it never activates normally.
-	const effects = buildSkillEffects(alternatives[0], perspective);
+	const effects = buildSkillEffects(alternatives[0], perspective, level);
 	if (effects.length == 0 && !ignoreNullEffects) {
 		return [];
 	} else {
@@ -326,7 +338,8 @@ export function buildSkillData(horse: HorseParameters, raceParams: PartialRacePa
 			samplePolicy: ImmediatePolicy,
 			regions: afterEnd,
 			extraCondition: (_) => false,
-			effects: effects
+			effects: effects,
+			tags: skills[skillId].tags
 		}];
 	}
 }
@@ -395,11 +408,10 @@ export class RaceSolverBuilder {
 	_pacerSkills: PendingSkill[]
 	_rng: Rule30CARng
 	_parser: {parse: any, tokenize: any}
-	_skills: {id: string, p: Perspective}[]
+	_skills: {id: string, p: Perspective, lv: number}[]
 	_wisdomSeeds: Map<string,[number,number]>
 	_useWisdomChecks: boolean
-	_otherRawWisdom: number
-	_otherMood: Mood
+	_otherHorse: HorseDesc | null
 	_hpPolicyFactory: (course: CourseData, params: PartialRaceParameters, rng: PRNG) => HpPolicy
 	_samplePolicyOverride: Map<string, ActivationSamplePolicy>[]
 	_extraSkillHooks: ((skilldata: SkillData[], horse: HorseParameters, course: CourseData) => void)[]
@@ -409,13 +421,11 @@ export class RaceSolverBuilder {
 	constructor(readonly nsamples: number) {
 		this._course = null;
 		this._raceParams = {
-			mood: 2,
 			groundCondition: GroundCondition.Good,
 			weather: Weather.Sunny,
 			season: Season.Spring,
 			time: Time.Midday,
-			grade: Grade.G1,
-			popularity: 1
+			grade: Grade.G1
 		};
 		this._horse = null;
 		this._pacer = null;
@@ -425,8 +435,7 @@ export class RaceSolverBuilder {
 		this._skills = [];
 		this._wisdomSeeds = new Map();
 		this._useWisdomChecks = false;
-		this._otherRawWisdom = 2000;  // no good default really
-		this._otherMood = 2;
+		this._otherHorse = null;
 		this._hpPolicyFactory = (course, params, rng) => new GameHpPolicy(course, params.groundCondition, rng);
 		this._samplePolicyOverride = [null, new Map(), new Map(), new Map()];  // Perspectives start at 1
 		this._extraSkillHooks = [];
@@ -445,11 +454,6 @@ export class RaceSolverBuilder {
 		} else {
 			this._course = course;
 		}
-		return this;
-	}
-
-	mood(mood: Mood) {
-		this._raceParams.mood = mood;
 		return this;
 	}
 
@@ -475,11 +479,6 @@ export class RaceSolverBuilder {
 
 	grade(grade: string | Grade) {
 		this._raceParams.grade = parseGrade(grade);
-		return this;
-	}
-
-	popularity(popularity: number) {
-		this._raceParams.popularity = popularity;
 		return this;
 	}
 
@@ -527,14 +526,16 @@ export class RaceSolverBuilder {
 				rarity: SkillRarity.White,
 				trigger: new Region(0, 100),
 				extraCondition: (_) => true,
-				effects: [{type: SkillType.Accel, baseDuration: 3.0, modifier: 0.2}]
+				effects: [{type: SkillType.Accel, target: SkillTarget.Self, baseDuration: 3.0, durationScaling: 1, modifier: 0.2, modifierScaling: 1}],
+				tags: skills['201601'].tags
 			}, {
 				skillId: '200532',
 				perspective: Perspective.Self,
 				rarity: SkillRarity.White,
 				trigger: new Region(0, 100),
 				extraCondition: (_) => true,
-				effects: [{type: SkillType.Accel, baseDuration: 1.2, modifier: 0.2}]
+				effects: [{type: SkillType.Accel, target: SkillTarget.Self, baseDuration: 1.2, durationScaling: 1, modifier: 0.2, modifierScaling: 1}],
+				tags: skills['200532'].tags
 			}];
 		}
 		return this;
@@ -550,74 +551,91 @@ export class RaceSolverBuilder {
 		return this;
 	}
 
-	// NB. must be called after horse and mood are set
-	withAsiwotameru() {
-		// for some reason, asitame (probably??) uses *displayed* power adjusted for motivation + greens
-		const baseDisplayedPower = this._horse.power * (1 + 0.02 * this._raceParams.mood);
-		this._extraSkillHooks.push((skilldata, horse, course) => {
-			const power = skilldata.reduce((acc,sd) => {
-				const powerUp = sd.effects.find(ef => ef.type == SkillType.PowerUp);
-				if (powerUp && sd.regions.length > 0 && sd.regions[0].start < 9999) {
-					return acc + powerUp.modifier;
-				} else {
-					return acc;
-				}
-			}, baseDisplayedPower);
-
-			if (power > 1200) {
-				const spurtStart = new RegionList();
-				spurtStart.push(new Region(CourseHelpers.phaseStart(course.distance, 2), course.distance));
+	// 位置取り争い. only actually applies to (oo)nige, where it's a guts-based target speed up over the first quarter
+	// of the course (up to 8 sections), with an increased hp drain while active (see GameHpPolicy.getStatusModifier)
+	withItidoriarasoi() {
+		const strategy = parseStrategy(this._horse.strategy);
+		if (StrategyHelpers.strategyMatches(strategy, Strategy.Nige)) {
+			this._extraSkillHooks.push((skilldata, horse, course) => {
+				const early = new RegionList();
+				early.push(new Region(150, course.distance / 4));
 				skilldata.push({
-					skillId: 'asitame',
+					skillId: 'itidoriarasoi',
 					perspective: Perspective.Self,
 					rarity: SkillRarity.White,
 					wisdomCheck: false,
-					regions: spurtStart,
-					samplePolicy: ImmediatePolicy,
+					regions: early,
+					samplePolicy: RandomPolicy,
 					extraCondition: (_) => true,
 					effects: [{
-						type: SkillType.Accel,
-						baseDuration: 3.0 / (course.distance / 1000.0),
-						modifier: Asitame.calcApproximateModifier(power, horse.strategy, course.distanceType)
-					}]
+						type: SkillType.TargetSpeed,
+						target: SkillTarget.Self,
+						baseDuration: 0.0,
+						durationScaling: 9999,
+						durationScalingFunc: (s: RaceSolver) => Math.sqrt(700 * s.horse.guts) * 0.012,
+						modifier: 0.0,
+						modifierScaling: 9999,
+						modifierScalingFunc: (s: RaceSolver) => Math.pow(500 * s.horse.guts, 0.6) * 0.0001
+					}],
+					tags: []
 				});
-			}
+			});
+		}
+		return this;
+	}
+
+	withAsiwotameru() {
+		this._extraSkillHooks.push((skilldata, horse, course) => {
+			const spurtStart = new RegionList();
+			spurtStart.push(new Region(CourseHelpers.phaseStart(course.distance, 2), course.distance));
+			skilldata.push({
+				skillId: 'asitame',
+				perspective: Perspective.Self,
+				rarity: SkillRarity.White,
+				wisdomCheck: false,
+				regions: spurtStart,
+				samplePolicy: ImmediatePolicy,
+				// rawPower on the solver reflects greens as they activate, so the gate and modifier are evaluated at runtime
+				extraCondition: (s: RaceState) => (s as RaceSolver).horse.rawPower > 1200,
+				effects: [{
+					type: SkillType.Accel,
+					target: SkillTarget.Self,
+					baseDuration: 3.0 / (course.distance / 1000.0),
+					durationScaling: 1,
+					modifier: 0.0,
+					modifierScaling: 9999,
+					modifierScalingFunc: (s: RaceSolver) => Asitame.calcApproximateModifier(s.horse.rawPower, s.horse.strategy, s.course.distanceType)
+				}],
+				tags: []
+			});
 		});
 		return this;
 	}
 
 	withStaminaSyoubu() {
 		this._extraSkillHooks.push((skilldata, horse, course) => {
-			// unfortunately the simulator doesnt (yet) support dynamic modifiers, so we have to account for greens here
-			// even though they are later added normally during execution
-			const stamina = skilldata.reduce((acc,sd) => {
-				const staminaUp = sd.effects.find(ef => ef.type == SkillType.StaminaUp);
-				if (staminaUp && sd.regions.length > 0 && sd.regions[0].start < 9999) {
-					return acc + staminaUp.modifier;
-				} else {
-					return acc;
-				}
-			}, horse.rawStamina);
-
-			if (stamina > 1200) {
-				const spurtStart = new RegionList();
-				spurtStart.push(new Region(CourseHelpers.phaseStart(course.distance, 2), course.distance));
-				skilldata.push({
-					skillId: 'staminasyoubu',
-					perspective: Perspective.Self,
-					rarity: SkillRarity.White,
-					wisdomCheck: false,
-					regions: spurtStart,
-					samplePolicy: ImmediatePolicy,
-					// TODO do current speed skills count toward reaching max speed or not?
-					extraCondition: (s: RaceState) => s.currentSpeed >= s.lastSpurtSpeed,
-					effects: [{
-						type: SkillType.TargetSpeed,
-						baseDuration: 9999.0,
-						modifier: StaminaSyoubu.calcApproximateModifier(stamina, course.distance)
-					}]
-				});
-			}
+			const spurtStart = new RegionList();
+			spurtStart.push(new Region(CourseHelpers.phaseStart(course.distance, 2), course.distance));
+			skilldata.push({
+				skillId: 'staminasyoubu',
+				perspective: Perspective.Self,
+				rarity: SkillRarity.White,
+				wisdomCheck: false,
+				regions: spurtStart,
+				samplePolicy: ImmediatePolicy,
+				// TODO do current speed skills count toward reaching max speed or not?
+				extraCondition: (s: RaceState) => (s as RaceSolver).horse.rawStamina > 1200 && s.currentSpeed >= s.lastSpurtSpeed,
+				effects: [{
+					type: SkillType.TargetSpeed,
+					target: SkillTarget.Self,
+					baseDuration: 9999.0,
+					durationScaling: 1,
+					modifier: 0.0,
+					modifierScaling: 9999,
+					modifierScalingFunc: (s: RaceSolver) => StaminaSyoubu.calcApproximateModifier(s.horse.rawStamina, s.course.distance)
+				}],
+				tags: []
+			});
 		});
 		return this;
 	}
@@ -628,14 +646,13 @@ export class RaceSolverBuilder {
 		return this;
 	}
 
-	otherRawWisdom(wisdom: number, mood?: Mood) {
-		this._otherRawWisdom = wisdom;
-		this._otherMood = mood != null ? mood : this._raceParams.mood;
+	otherHorse(horse: HorseDesc) {
+		this._otherHorse = horse;
 		return this;
 	}
 
-	addSkill(skillId: string, perspective: Perspective = Perspective.Self, samplePolicy?: ActivationSamplePolicy) {
-		this._skills.push({id: skillId, p: perspective});
+	addSkill(skillId: string, perspective: Perspective = Perspective.Self, level: number = 1, samplePolicy?: ActivationSamplePolicy) {
+		this._skills.push({id: skillId, p: perspective, lv: level});
 		if (samplePolicy != null) {
 			this._samplePolicyOverride[perspective].set(skillId, samplePolicy);
 		}
@@ -664,8 +681,7 @@ export class RaceSolverBuilder {
 		clone._skills = this._skills.slice();
 		clone._useWisdomChecks = this._useWisdomChecks;
 		clone._wisdomSeeds = new Map(this._wisdomSeeds.entries());
-		clone._otherRawWisdom = this._otherRawWisdom;
-		clone._otherMood = this._otherMood;
+		clone._otherHorse = this._otherHorse;
 		clone._hpPolicyFactory = this._hpPolicyFactory;
 		clone._samplePolicyOverride = this._samplePolicyOverride.map(m => m == null ? null : new Map(m.entries()));
 		clone._onSkillActivate = this._onSkillActivate;
@@ -680,28 +696,39 @@ export class RaceSolverBuilder {
 	}
 
 	*build() {
-		let horse = buildBaseStats(this._horse, this._raceParams.mood);
+		let horse = buildBaseStats(this._horse);
 		let solverRng = new Rule30CARng(this._rng.int32());
 		let pacerRng = new Rule30CARng(this._rng.int32());  // need this even if _pacer is null in case we forked from/to something with a pacer
 															// (to keep the rngs in sync)
 
-		const pacerHorse = this._pacer ? buildAdjustedStats(buildBaseStats(this._pacer, this._raceParams.mood), this._course, this._raceParams.groundCondition) : null;
+		const pacerHorse = this._pacer ? buildAdjustedStats(buildBaseStats(this._pacer), this._course, this._raceParams.groundCondition) : null;
 
 		const wholeCourse = new RegionList();
 		wholeCourse.push(new Region(0, this._course.distance));
 		Object.freeze(wholeCourse);
 
-		const otherBaseWisdom = adjustOvercap(this._otherRawWisdom) * (1 + 0.02 * this._otherMood);
+		const otherHorse = buildBaseStats(this._otherHorse || this._horse);
 		// Self = 1, Other = 2, Any = 3
 		// not clear that "always activate" is the correct behavior for Perspective.Any, however, that's not used under normal usage
-		const skillActivationChance = [0.0, Math.max(1 - 90 / horse.wisdom, 0.2), Math.max(1 - 90 / otherBaseWisdom, 0.2), 1.0];
+		const skillActivationChance = [0.0, Math.max(1 - 90 / horse.wisdom, 0.2), Math.max(1 - 90 / otherHorse.wisdom, 0.2), 1.0];
 
-		const makeSkill = buildSkillData.bind(null, horse, this._raceParams, this._course, wholeCourse, this._parser);
-		const skilldata = this._skills.flatMap(({id,p}) => makeSkill(id, p));
+		const makeSkill = buildSkillData.bind(null, horse, otherHorse, this._raceParams, this._course, wholeCourse, this._parser);
+		const skilldata = this._skills.flatMap(({id,p,lv}) => makeSkill(id, p, lv));
 		this._extraSkillHooks.forEach(h => h(skilldata, horse, this._course));
+		// derive each skill's trigger-sampling rng from one draw of the main rng per unique skill id, so that adding
+		// or removing a skill doesn't shift every other skill's trigger positions (multiple triggers/perspectives of
+		// the same skill share the seed and each sample from a fresh rng)
+		const triggerSeeds = new Map<string,[number,number]>();
 		const triggers = skilldata.map(sd => {
 			const sp = this._samplePolicyOverride[sd.perspective].get(sd.skillId) || sd.samplePolicy;
-			return sp.sample(sd.regions, this.nsamples, this._rng)
+			let seed;
+			if (triggerSeeds.has(sd.skillId)) {
+				seed = triggerSeeds.get(sd.skillId);
+			} else {
+				seed = this._rng.pair();
+				triggerSeeds.set(sd.skillId, seed);
+			}
+			return sp.sample(sd.regions, this.nsamples, new Rule30CARng(seed[0], seed[1]));
 		});
 		const wisdomRngs = new Map(Array.from(this._wisdomSeeds.entries()).map(([id,seed]) => [id,new Rule30CARng(...seed)]));
 
@@ -722,7 +749,8 @@ export class RaceSolverBuilder {
 					wisdomCheck: sd.wisdomCheck,
 					trigger: triggers[sdi][i % triggers[sdi].length],
 					extraCondition: sd.extraCondition,
-					effects: sd.effects
+					effects: sd.effects,
+					tags: sd.tags
 				})).filter(sd => !this._useWisdomChecks || !sd.wisdomCheck || wisdomRngs.get(sd.skillId).random() < skillActivationChance[sd.perspective]);
 			}
 

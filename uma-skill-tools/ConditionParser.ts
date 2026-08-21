@@ -131,14 +131,19 @@ export function getParser<ConditionT = Condition, OperatorT = Operator>(
 		var i = 0;
 		while (i < s.length) {
 			var c = s.charCodeAt(i);
-			if ('0'.charCodeAt(0) <= c && c <= '9'.charCodeAt(0)) {
+			if ('0'.charCodeAt(0) <= c && c <= '9'.charCodeAt(0) || c == '-'.charCodeAt(0)) {
 				var n = 0;
+				var sign = 1;
+				if (c == '-'.charCodeAt(0)) {
+					sign = -1;
+					c = s.charCodeAt(++i);
+				}
 				while ('0'.charCodeAt(0) <= c && c <= '9'.charCodeAt(0)) {
 					n *= 10;
 					n += c - '0'.charCodeAt(0);
 					c = s.charCodeAt(++i);
 				}
-				yield new IntValue<ConditionT,OperatorT>(n);
+				yield new IntValue<ConditionT,OperatorT>(n * sign);
 			} else if (isId(c)) {
 				var idstart = i;
 				while (isId(c)) {

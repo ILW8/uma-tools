@@ -20,9 +20,10 @@
 // `node cli.mjs --selfcheck` runs the assertions on the skill list/cost bookkeeping copied out of the tsx.
 // cli.md has the longer version: what the flags do, what's assumed, and what the numbers mean.
 //
-// ponytail: drives the prebuilt worker rather than the TS sources, because umalator/compare.ts currently
-// needs RaceSolverBuilder methods (otherHorse, withItidoriarasoi, 4-arg addSkill) that don't exist in the
-// pinned uma-skill-tools submodule. Switch to bundling the sources once the submodule catches up.
+// The TS sources build again since uma-skill-tools was vendored and the unpushed engine delta ported
+// (docs/superpowers/specs/2026-08-21-simulator-worker-ts-design.md); the committed bundle stays the
+// default because it's the exact artifact the website ships. Set UMALATOR_WORKER=<path> to run a fresh
+// build of umalator/simulator.worker.ts instead — bit-identical to the shipped bundle as of the port.
 
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -48,7 +49,7 @@ function makeWorker() {
 		postMessage: m => { last = m; },
 		console
 	});
-	vm.runInContext(fs.readFileSync(path.join(dir, 'simulator.worker.js'), 'utf8'), ctx, {filename: 'simulator.worker.js'});
+	vm.runInContext(fs.readFileSync(process.env.UMALATOR_WORKER || path.join(dir, 'simulator.worker.js'), 'utf8'), ctx, {filename: 'simulator.worker.js'});
 	// the handlers are synchronous and post progress updates as they go; only the last one is complete
 	return message => { last = undefined; onmessage({data: message}); return last; };
 }

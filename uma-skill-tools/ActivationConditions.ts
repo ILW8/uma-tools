@@ -439,7 +439,15 @@ export const Conditions: {[cond: string]: Condition} = Object.freeze({
 			return [regions, (s: RaceState) => s.activateCountHeal >= n] as [RegionList, DynamicCondition];
 		}
 	}),
+	activate_count_later_half: immediate({
+		filterGte(regions: RegionList, n: number, _0: CourseData, _1: HorseParameters, extra: RaceParameters) {
+			return [regions, (s: RaceState) => s.activateCountLaterHalf >= n] as [RegionList, DynamicCondition];
+		}
+	}),
 	activate_count_middle: immediate({
+		filterEq(regions: RegionList, n: number, _0: CourseData, _1: HorseParameters, extra: RaceParameters) {
+			return [regions, (s: RaceState) => s.activateCount[1] == n] as [RegionList, DynamicCondition];
+		},
 		filterGte(regions: RegionList, n: number, _0: CourseData, _1: HorseParameters, extra: RaceParameters) {
 			return [regions, (s: RaceState) => s.activateCount[1] >= n] as [RegionList, DynamicCondition];
 		}
@@ -538,9 +546,17 @@ export const Conditions: {[cond: string]: Condition} = Object.freeze({
 			}
 		},
 		filterNeq(regions: RegionList, cornerNum: number, course: CourseData, _: HorseParameters, extra: RaceParameters) {
-			assert(cornerNum == 0, 'only supports corner!=0');
-			const corners = course.corners.map(c => new Region(c.start, c.start + c.length));
-			return regions.rmap(r => corners.map(c => r.intersect(c)));
+			if (cornerNum == 0) {
+				const corners = course.corners.map(c => new Region(c.start, c.start + c.length));
+				return regions.rmap(r => corners.map(c => r.intersect(c)));
+			} else if (course.corners.length + cornerNum >= 5) {
+				const corner = course.corners[course.corners.length + cornerNum - 5];
+				const before = new Region(0, corner.start);
+				const after = new Region(corner.start + corner.length, course.distance);
+				return regions.rmap(r => [r.intersect(before), r.intersect(after)]);
+			} else {
+				return regions;
+			}
 		}
 	}),
 	corner_count: valueFilter((course: CourseData, _: HorseParameters, extra: RaceParameters) => course.corners.length),
@@ -623,6 +639,13 @@ export const Conditions: {[cond: string]: Condition} = Object.freeze({
 			return regions.rmap(r => slopes.map(s => r.intersect(s)));
 		}
 	}),
+	fan_count: noopImmediate,
+	furlong: immediate({
+		filterEq(regions: RegionList, furlong: number, course: CourseData, _: HorseParameters, extra: RaceParameters) {
+			const bounds = new Region(200 * furlong, 200 * furlong + 200);
+			return regions.rmap(r => r.intersect(bounds));
+		}
+	}),
 	grade: valueFilter((_0: CourseData, _1: HorseParameters, extra: RaceParameters) => extra.grade),
 	ground_condition: valueFilter((_0: CourseData, _1: HorseParameters, extra: RaceParameters) => extra.groundCondition),
 	ground_type: valueFilter((course: CourseData, _: HorseParameters, extra: RaceParameters) => course.surface),
@@ -637,10 +660,24 @@ export const Conditions: {[cond: string]: Condition} = Object.freeze({
 		}
 	}),
 	infront_near_lane_time: noopErlangRandom(3, 2.0),
+	is_abroad: immediate({
+		filterEq(regions: RegionList, flag: number, course: CourseData, _: HorseParameters, extra: RaceParameters) {
+			assert(flag == 0 || flag == 1, 'must be is_abroad==0 or is_abroad==1');
+			// longchamp, santa anita, del mar
+			return ([10201, 10202, 10203].indexOf(course.raceTrackId) > -1) == !!flag ? regions : new RegionList();
+		}
+	}),
 	is_activate_any_skill: immediate({
 		filterEq(regions: RegionList, one: number, _0: CourseData, _1: HorseParameters, extra: RaceParameters) {
 			assert(one == 1, 'must be is_activate_any_skill==1');
 			return [regions, (s: RaceState) => s.activateCountLastFrame > 0] as [RegionList, DynamicCondition];
+		}
+	}),
+	is_activate_heal_skill: immediate({
+		filterEq(regions: RegionList, one: number, _0: CourseData, _1: HorseParameters, extra: RaceParameters) {
+			assert(one == 1, 'must be is_activate_heal_skill==1');
+			assert(false, 'warn: not properly implemented for xtoproad unique');  // inert in release builds, same as the shipped bundle
+			return [regions, (s: RaceState) => s.activateCountHealLastFrame > 0] as [RegionList, DynamicCondition];
 		}
 	}),
 	is_activate_other_skill_detail: immediate({
@@ -713,7 +750,7 @@ export const Conditions: {[cond: string]: Condition} = Object.freeze({
 	is_hp_empty_onetime: immediate({
 		filterEq(regions: RegionList, one: number, course: CourseData, _: HorseParameters, extra: RaceParameters) {
 			assert(one == 1, 'must be is_hp_empty_onetime==1');
-			return [regions, (s: RaceState) => !s.hp.hasRemainingHp()] as [RegionList, DynamicCondition];
+			return [regions, (s: RaceState) => s.hp.remainingHp() <= 0] as [RegionList, DynamicCondition];
 		}
 	}),
 	is_lastspurt: immediate({
@@ -742,7 +779,9 @@ export const Conditions: {[cond: string]: Condition} = Object.freeze({
 		}
 	}),
 	is_move_lane: noopErlangRandom(5, 1.0),
+	is_other_character_activate_advantage_skill: noopRandom,
 	is_overtake: noopErlangRandom(1, 2.0),
+	is_popularity_top_character_activate_advantage_skill: noopRandom,
 	is_surrounded: noopErlangRandom(3, 2.0),
 	is_temptation: immediate({
 		filterEq(regions: RegionList, b: number, _0: CourseData, _1: HorseParameters, extra: RaceParameters) {
@@ -776,12 +815,14 @@ export const Conditions: {[cond: string]: Condition} = Object.freeze({
 			return [regions.rmap(r => r.intersect(bounds)), f] as [RegionList, DynamicCondition];
 		}
 	}),
-	motivation: valueFilter((_0: CourseData, _1: HorseParameters, extra: RaceParameters) => extra.mood + 3),  // go from -2 to 2 to 1-5 scale
+	motivation: valueFilter((_0: CourseData, horse: HorseParameters, extra: RaceParameters) => horse.mood + 3),  // go from -2 to 2 to 1-5 scale
 	near_count: noopErlangRandom(3, 2.0),
+	near_infront_count: noopErlangRandom(3, 2.0),
 	order: orderFilter((pos: number, _: number) => pos),
 	order_rate: orderFilter((rate: number, numUmas: number) => Math.round(numUmas * (rate / 100.0))),
 	order_rate_in20_continue: orderInFilter(0.2),
 	order_rate_in40_continue: orderInFilter(0.4),
+	order_rate_in50_continue: orderInFilter(0.5),
 	order_rate_in80_continue: orderInFilter(0.8),
 	order_rate_out20_continue: orderOutFilter(0.2),
 	order_rate_out40_continue: orderOutFilter(0.4),
@@ -875,6 +916,15 @@ export const Conditions: {[cond: string]: Condition} = Object.freeze({
 			return regions.rmap(r => r.intersect(bounds));
 		}
 	}),
+	phase_laterhalf: immediate({
+		filterEq(regions: RegionList, phase: number, course: CourseData, _: HorseParameters, extra: RaceParameters) {
+			CourseHelpers.assertIsPhase(phase);
+			const start = CourseHelpers.phaseStart(course.distance, phase);
+			const end = CourseHelpers.phaseEnd(course.distance, phase);
+			const bounds = new Region((start + end) / 2, end);
+			return regions.rmap(r => r.intersect(bounds));
+		}
+	}),
 	phase_laterhalf_random: random({
 		filterEq(regions: RegionList, phase: number, course: CourseData, _: HorseParameters, extra: RaceParameters) {
 			CourseHelpers.assertIsPhase(phase);
@@ -884,6 +934,21 @@ export const Conditions: {[cond: string]: Condition} = Object.freeze({
 			return regions.rmap(r => r.intersect(bounds));
 		}
 	}),
+	phase_latter_half_straight_random: {
+		samplePolicy: StraightRandomPolicy,
+		filterEq(regions: RegionList, phase: number, course: CourseData, _: HorseParameters, extra: RaceParameters) {
+			CourseHelpers.assertIsPhase(phase);
+			const start = CourseHelpers.phaseStart(course.distance, phase);
+			const end = CourseHelpers.phaseEnd(course.distance, phase);
+			const laterHalf = new Region((start + end) / 2, end);
+			return regions.rmap(r => course.straights.map(s => r.intersect(s))).rmap(r => r.intersect(laterHalf));
+		},
+		filterNeq: notSupported,
+		filterLt: notSupported,
+		filterLte: notSupported,
+		filterGt: notSupported,
+		filterGte: notSupported
+	},
 	phase_random: random({
 		filterEq(regions: RegionList, phase: number, course: CourseData, _: HorseParameters, extra: RaceParameters) {
 			CourseHelpers.assertIsPhase(phase);
@@ -904,7 +969,7 @@ export const Conditions: {[cond: string]: Condition} = Object.freeze({
 		filterGt: notSupported,
 		filterGte: notSupported
 	},
-	popularity: valueFilter((_0: CourseData, _1: HorseParameters, extra: RaceParameters) => extra.popularity),
+	popularity: valueFilter((_0: CourseData, horse: HorseParameters, extra: RaceParameters) => horse.popularity),
 	post_number: (function () {
 		function gateBlock(s: RaceState, numUmas: number) {
 			const gateNumber = s.gateRoll % numUmas;  // modulo result guaranteed to be uniformly distributed due to the properties of s.gateRoll
@@ -964,21 +1029,20 @@ export const Conditions: {[cond: string]: Condition} = Object.freeze({
 	}),
 	running_style_count_same: noopImmediate,
 	running_style_count_same_rate: noopImmediate,
-	// these are used exclusively on debuffs, in which case they only get added to /us/ from the "other" perspective, in which case
-	// we actually want them to active if /our/ strategy matches the condition
-	// NB. this seems kind of questionable in general. perhaps a perspective member should be added to RaceParameters.
-	// also, abusing valueFilter like this only works because these conditions are used like running_style_count_nige_otherself>=1
+	// these are used exclusively on debuffs; conditions are evaluated against the debuffed uma, whose strategy is
+	// carried on RaceParameters.otherHorse (set by RaceSolverBuilder from the target's built stats)
+	// NB. abusing valueFilter like this only works because these conditions are used like running_style_count_nige_otherself>=1
 	running_style_count_nige_otherself: valueFilter(
-		(_: CourseData, horse: HorseParameters, extra: RaceParameters) => +StrategyHelpers.strategyMatches(horse.strategy, Strategy.Nige)
+		(_: CourseData, horse: HorseParameters, extra: RaceParameters) => +StrategyHelpers.strategyMatches(extra.otherHorse.strategy, Strategy.Nige)
 	),
 	running_style_count_senko_otherself: valueFilter(
-		(_: CourseData, horse: HorseParameters, extra: RaceParameters) => +StrategyHelpers.strategyMatches(horse.strategy, Strategy.Senkou)
+		(_: CourseData, horse: HorseParameters, extra: RaceParameters) => +StrategyHelpers.strategyMatches(extra.otherHorse.strategy, Strategy.Senkou)
 	),
 	running_style_count_sashi_otherself: valueFilter(
-		(_: CourseData, horse: HorseParameters, extra: RaceParameters) => +StrategyHelpers.strategyMatches(horse.strategy, Strategy.Sasi)
+		(_: CourseData, horse: HorseParameters, extra: RaceParameters) => +StrategyHelpers.strategyMatches(extra.otherHorse.strategy, Strategy.Sasi)
 	),
 	running_style_count_oikomi_otherself: valueFilter(
-		(_: CourseData, horse: HorseParameters, extra: RaceParameters) => +StrategyHelpers.strategyMatches(horse.strategy, Strategy.Oikomi)
+		(_: CourseData, horse: HorseParameters, extra: RaceParameters) => +StrategyHelpers.strategyMatches(extra.otherHorse.strategy, Strategy.Oikomi)
 	),
 	running_style_equal_popularity_one: noopImmediate,
 	// TODO because we actually implement kakari now these should no longer be sectionRandom. unfortunately, it's not really clear what
