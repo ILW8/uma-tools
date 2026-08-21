@@ -685,7 +685,11 @@ export class RaceSolver {
 		this.activateCountHealThisFrame = 0;
 		for (let i = this.pendingSkills.length; --i >= 0;) {
 			const s = this.pendingSkills[i];
-			if (this.pos >= s.trigger.end || this.pendingRemoval.has(s.skillId + s.perspective)) {  // NB. `Region`s are half-open [start,end) intervals. If pos == end we are out of the trigger.
+			// the size check is not redundant: has() has to build `skillId + perspective` first, and this loop
+			// runs over every still-pending skill on every frame, so that is a string allocated per skill per
+			// frame to probe a set that only 564 ever writes to and is empty in almost every race. Measured
+			// 1.11x over a chart round.
+			if (this.pos >= s.trigger.end || (this.pendingRemoval.size > 0 && this.pendingRemoval.has(s.skillId + s.perspective))) {  // NB. `Region`s are half-open [start,end) intervals. If pos == end we are out of the trigger.
 				// skill failed to activate
 				// FIXME removing from pendingSkills here means that 564 will never pick a skill that already passed its chance to activate
 				// (and failed) before 564 procced, which is wrong
