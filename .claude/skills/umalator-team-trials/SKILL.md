@@ -84,6 +84,10 @@ probably isn't near-optimal for that uma.
   Group-mates are the opposite case: they're prerequisites, so you buy *both*, lower tier first.
 - **`+N prereq` on a runner-up** means its SP column is the chain price, not the skill's own cost. The
   skill reappears at its own price once the tier below it is bought.
+- **`spurt A% / B%` on the screen line** is the share of races each style finished with a full last
+  spurt. Diagnostic, not a tiebreak — it explains where a margin comes from, not whether to trust it. A
+  style that can't spurt bleeds bashin no skill buys back, but the gap survives without it: at medium
+  2400 both styles spurt 0% of the time and Senkou still wins by 14 bashin, on HP drain alone.
 - **Marginal, not standalone.** The column is the gain *given everything above it*. You cannot reorder
   the list and keep the numbers.
 

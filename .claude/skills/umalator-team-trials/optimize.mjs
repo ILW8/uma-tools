@@ -159,13 +159,17 @@ async function headToHead(treeA, stratA, treeB, stratB, nsamples = NSAMPLES) {
 		const [a, b] = await Promise.all([dump(treeA, course, stratA), dump(treeB, course, stratB)]);
 		const state = scratchFile(`cmp-${i}.json`);  // one per course; they run concurrently now
 		writeFileSync(state, JSON.stringify({...a, uma2: b.uma1}));
-		const {results} = JSON.parse(await runP([state, '--nsamples', nsamples, '--json']));
+		const {results, nspurt} = JSON.parse(await runP([state, '--nsamples', nsamples, '--json']));
 		const mean = results.reduce((x, y) => x + y, 0) / results.length;
-		return {label, w, mean, ahead: results.filter(x => x > 0).length / results.length * 100};
+		return {label, w, mean, ahead: results.filter(x => x > 0).length / results.length * 100,
+			// nspurt = samples where each uma got a full last spurt; a style that can't finish the
+			// spurt loses bashin no skill buys back, so it explains most of the margin's spread
+			spurt: nspurt.map(x => x / results.length * 100)};
 	});
 	return {
 		wmean: rows.reduce((a, r) => a + r.mean * r.w / WSUM, 0),
 		wahead: rows.reduce((a, r) => a + r.ahead * r.w / WSUM, 0),
+		wspurt: [0, 1].map(i => rows.reduce((a, r) => a + r.spurt[i] * r.w / WSUM, 0)),
 		rows
 	};
 }
@@ -263,8 +267,9 @@ if (candidates.length > 1) {
 	const ref = candidates[0];
 	screen = [{name: ref, margin: 0}];
 	for (const s of candidates.slice(1)) {
-		const {wmean, wahead} = await headToHead(builds.get(ref).file, ref, builds.get(s).file, s, SCREEN_SAMPLES);
-		console.log(`  ${s.padEnd(8)} ${wmean >= 0 ? '+' : ''}${wmean.toFixed(2)} bashin vs ${ref}  (ahead ${wahead.toFixed(1)}% of races)`);
+		const {wmean, wahead, wspurt} = await headToHead(builds.get(ref).file, ref, builds.get(s).file, s, SCREEN_SAMPLES);
+		console.log(`  ${s.padEnd(8)} ${wmean >= 0 ? '+' : ''}${wmean.toFixed(2)} bashin vs ${ref}  (ahead ${wahead.toFixed(1)}%`
+			+ ` of races)  spurt ${ref} ${wspurt[0].toFixed(0)}% / ${s} ${wspurt[1].toFixed(0)}%`);
 		screen.push({name: s, margin: wmean});
 	}
 	screen.sort((a, b) => b.margin - a.margin);
