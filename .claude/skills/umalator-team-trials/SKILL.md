@@ -19,9 +19,17 @@ Both matter. Recovery skills routinely show 1.3 bashin standalone and 0.04 once 
 
 ## Usage
 
+Build the simulator worker from the TS sources first, and point the run at it — that way the
+optimizer reflects any local engine edits in `uma-skill-tools/` instead of the committed bundle:
+
 ```
-node .claude/skills/umalator-team-trials/optimize.mjs <skill_tree.json> <sprint|mile|medium|long|dirt>
+node umalator-global/build-worker.mjs <scratch>/worker.js
+UMALATOR_WORKER=<scratch>/worker.js node .claude/skills/umalator-team-trials/optimize.mjs <skill_tree.json> <sprint|mile|medium|long|dirt>
 ```
+
+`<scratch>` is any temp path (the session scratchpad is fine). The env var propagates through
+`optimize.mjs` into `cli.mjs` and its worker threads; if it's unset, everything falls back to the
+committed `simulator.worker.js`.
 
 Run it from the repo root or `umalator-global/`; otherwise pass `--dir path/to/umalator-global`.
 `skill_tree.json` is UmaExtractor's, and must contain the `uma` block (`--skills` alone won't do).
@@ -119,8 +127,9 @@ profile puts ~92% of a run in physics (`step`, `updateTargetSpeed`, `processSkil
 sampling ladder already spends only 16% of a round on the candidates that die at 20 samples, and dropping
 them makes the work queue too shallow to balance. What is left is worth **1.9×** — chart mode
 re-simulates the unchanged baseline uma once per candidate, and that run measures bit-identical across
-candidates (except for candidates that debuff, which have to fall back). It needs a patched
-`simulator.worker.js`, which is why it hasn't been done.
+candidates (except for candidates that debuff, which have to fall back). It needs an engine change in
+`uma-skill-tools/` — feasible now that the worker builds from TS (see `build-worker.mjs`), just not
+done yet.
 
 ## Assumptions baked in
 
@@ -140,6 +149,10 @@ Ground distribution is roughly 77% firm across race types, so the default is rep
 tell you the *weights* have gone stale. Re-check the source if results look off.
 
 ## Requires
+
+`umalator-global/build-worker.mjs` for the build step, and `cli.mjs` honoring `UMALATOR_WORKER`
+(both since the simulator-worker-ts branch). On an older checkout skip the build step and run
+against the committed bundle.
 
 `cli.mjs --dumpstate`, which prints the built state and exits so two of them can be spliced into one
 compare state. If it's missing, this skill's head-to-head phases can't run.
